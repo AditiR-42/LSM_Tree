@@ -10,7 +10,28 @@ A write-optimized NoSQL key-value store based on an LSM-tree design. Currently, 
 *   CMake (version 3.15 or higher)
 *   Make (or Ninja build tool)
 
-## Build Instructions
+## Docker Instructions
+
+1.  **Clone the repository:**
+
+    ```bash
+    git clone <your_repository_url>
+    cd LSM_Tree
+    ```
+
+2.  **Build the Dockerfile:**
+
+    ```
+    docker build -t lsm_tree .
+    ```
+
+3.  **Run the Dockerfile:**
+
+    ```
+    docker run -p 12345:12345 lsm_tree
+    ```
+
+## Build Instructions (without Docker)
 
 1.  **Clone the repository:**
 
