@@ -37,8 +37,6 @@
     - ```DELETE <key>```
 - Implement client that can connect to server and send CS265 DSL commands and display results from server
 
-size ratio??
-
 ## Phase 2: Concurrency
 
 ## Phase 3: Optimizations
