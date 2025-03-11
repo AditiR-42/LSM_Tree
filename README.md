@@ -6,7 +6,7 @@ A write-optimized NoSQL key-value store based on an LSM-tree design. Currently, 
 
 ## Prerequisites
 
-*   C++ compiler (GCC, Clang)
+*   C++ compiler (g++-11)
 *   CMake (version 3.15 or higher)
 *   Make (or Ninja build tool)
 
@@ -29,8 +29,10 @@ A write-optimized NoSQL key-value store based on an LSM-tree design. Currently, 
 3.  **Configure the build using CMake:**
 
     ```bash
-    cmake ..
+    cmake -DCMAKE_CXX_COMPILER=/usr/local/opt/gcc@11/bin/g++-11 ..
     ```
+
+    If issues arise, ensure that g++-11 is installed (`ls -l /usr/bin/g++-11`). If it is not installed, install it and update the path of `-DCMAKE_CXX_COMPILER` to point to the newly installed g++-11.
 
 4.  **Build the project:**
 
