@@ -36,6 +36,7 @@
     - ```GET <key>```
     - ```DELETE <key>```
 - Implement client that can connect to server and send CS265 DSL commands and display results from server
+- Integrate data generator (https://bitbucket.org/HarvardDASlab/cs265-sysproj/src/master/)
 
 ## Phase 2: Concurrency
 
