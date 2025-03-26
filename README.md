@@ -66,13 +66,13 @@ A write-optimized NoSQL key-value store based on an LSM-tree design. Currently, 
 1.  **Run the server:**
 
     ```bash
-    ./bin/LSM_Tree_server
+    ./build/LSM_Tree_server
     ```
 
     *   **Optional:**  You can specify a different data directory:
 
         ```bash
-        ./bin/LSM_Tree_server --data_dir=/path/to/my/data
+        ./build/LSM_Tree_server --data_dir=/path/to/my/data
         ```
 
 2.  **Run the client:**
@@ -80,13 +80,13 @@ A write-optimized NoSQL key-value store based on an LSM-tree design. Currently, 
     In a separate terminal:
 
     ```bash
-    ./bin/LSM_Tree_client
+    ./build/LSM_Tree_client
     ```
 
     *   The client will connect to the server at `localhost:12345` (default).  You can specify a different host and port using command-line arguments:
 
         ```bash
-        ./bin/LSM_Tree_client --host=192.168.1.10 --port=8080
+        ./build/LSM_Tree_client --host=192.168.1.10 --port=8080
         ```
 
 ## CS265 Domain Specific Language (DSL)
