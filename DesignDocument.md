@@ -26,7 +26,7 @@
 4.  **Merge Policy and Data Persistence**
 - Implement tiering merge policy (write-optimized): when the number of SSTables in Level 0 exceeds a threshold, merge them into a larger SSTable and move it to Level 1
 - Implement tombstone records for deleted keys
-- Implement shutdown procedures: flush memtable ot disk, close open file handles
+- Implement shutdown procedures: flush memtable to disk, close open file handles
 - Implement startup procedures: scan data directory, load all SSTables into LSM tree structure, rebuild bloom filters and fence pointers
 
 5.  **Server and Client Implementation**

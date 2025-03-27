@@ -1,5 +1,0 @@
-namespace kvstore {
-    class Server {
-        // ...
-    };
-}

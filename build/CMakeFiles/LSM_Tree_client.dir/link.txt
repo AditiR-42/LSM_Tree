@@ -1,1 +1,0 @@
-/usr/local/opt/gcc@11/bin/g++-11  -arch x86_64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX14.4.sdk -mmacosx-version-min=14.3 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/LSM_Tree_client.dir/src/client/client_main.cpp.o CMakeFiles/LSM_Tree_client.dir/src/client/client.cpp.o -o LSM_Tree_client 
