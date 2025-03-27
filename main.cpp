@@ -7,7 +7,7 @@
 
 using namespace std;
 
-void load(string& fileName, lsm_tree& lsm_tree_obj) {
+void load(string& fileName, lsm_tree* lsm_tree_obj) {
     ifstream file;
     string newfileName = "generator/" + fileName;
     file.open(newfileName, ios::binary);
@@ -20,17 +20,13 @@ void load(string& fileName, lsm_tree& lsm_tree_obj) {
     int value;
     while (file.read(reinterpret_cast<char*>(&key), sizeof(key)) &&  
            file.read(reinterpret_cast<char*>(&value), sizeof(value))) { 
-        lsm_tree_obj.insert({key, value}); // insert into lsm_tree
+        lsm_tree_obj->insert({key, value}); // insert into lsm_tree
     }
 
     if (file.gcount() > 0) {
         cerr << "Warning: Incomplete read at end of file `" << newfileName << "`.  File may be corrupted." << endl;
     }
     file.close();
-}
-
-void printStats() {
-    cout << "printStats() not implemented" << endl;
 }
 
 int main() {
@@ -69,7 +65,7 @@ int main() {
                     break;
                 }
                 case 's': // stats
-                    printStats();
+                    db->printStats();
                     break;
                 default:
                     cout << "Unknown: please use p, g, d, r, l, or s" << command << endl;
