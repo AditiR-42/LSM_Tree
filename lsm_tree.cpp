@@ -242,9 +242,39 @@ lsm_tree::lsm_tree() : next_run_id_(0) { // Initialize next_run_id_
 }
 
 lsm_tree::~lsm_tree() {
+    if (memtable_ptr_ && memtable_ptr_->curr_size_ > 0) {
+        std::cout << "LSM Tree Destructor: Memtable not empty, performing final flush..." << std::endl;
+        std::vector<key_value> data_to_flush = memtable_ptr_->flush(); // Flush remaining data
+
+        if (!data_to_flush.empty()) {
+            // Generate filename for Level 1
+            std::string final_sstable_file = generate_sstable_filename(1); // Will use the next available run ID
+
+            // Write flushed data to disk
+            if (write_sstable(data_to_flush, final_sstable_file)) {
+                 // Add run to Level 1's list (in memory, but won't persist unless saved)
+                 // This write operation itself is the persistence step.
+                 // The in-memory list update doesn't matter much here as the object is being destroyed.
+                 if (levels_.size() > 1 && levels_[1]) { // Basic check
+                      levels_[1]->add_run(final_sstable_file); // Update list for consistency if needed elsewhere
+                 }
+                 std::cout << "Final flush successful to: " << final_sstable_file << std::endl;
+                 // NOTE: This final flush might trigger merges if SIZE_RATIO is met.
+                 // Consider if check_and_trigger_merge(1) should be called here.
+                 // Usually, shutdown flushes just write the file and don't trigger further compactions.
+            } else {
+                 std::cerr << "Error: Failed to write final memtable flush to disk during shutdown!" << std::endl;
+            }
+        }
+    }
+    // --- End Shutdown Flush Logic ---
+
+
     delete memtable_ptr_;
     for (int i = 1; i <= MAX_LEVELS; ++i) {
-        delete levels_[i];
+        if (levels_[i]) { // Check if the pointer is valid before deleting
+             delete levels_[i];
+        }
     }
 }
 
