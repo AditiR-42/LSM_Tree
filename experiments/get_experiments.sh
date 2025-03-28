@@ -8,7 +8,7 @@ WORKLOAD_FILE="get_10.txt"
 DATABASE_EXEC_REL_PATH="../lsm_tree_app" 
 
 # Output file for timing and program logs
-OUTPUT_FILE="$(basename "$WORKLOAD_FILE" .txt)_1mb_output_v2.log"
+OUTPUT_FILE="$(basename "$WORKLOAD_FILE" .txt)_fencepointers.log"
 # --- End Configuration ---
 
 # Get the directory where the script is located

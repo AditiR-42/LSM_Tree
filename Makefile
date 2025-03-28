@@ -1,7 +1,7 @@
 # Makefile
 
 CC = g++
-CFLAGS = -Wall -g -std=c++11 -I.
+CFLAGS = -Wall -std=c++11 -O3
 
 TARGET = lsm_tree_app
 TEST_TARGET = test
