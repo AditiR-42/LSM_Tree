@@ -36,7 +36,7 @@ int main() {
     while (getline(cin, line)) {
         istringstream iss(line);
         char command;
-        int key, value, startKey, endKey;
+        int key, value;
         string fileName;
         iss >> command;
         try {

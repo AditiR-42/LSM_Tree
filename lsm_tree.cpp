@@ -4,9 +4,11 @@
 #include <vector>
 #include <string>
 #include <fstream>
-#include <cstdio> // For std::remove
-#include <queue>  // For priority_queue in merge
-#include <limits> // For numeric_limits
+#include <cstdio> 
+#include <queue> 
+#include <limits> 
+#include <map> 
+#include <set>
 
 using namespace std;
 
@@ -503,37 +505,126 @@ void lsm_tree::delete_key(int key) {
 
 
 void lsm_tree::printStats() {
-     // This needs significant rework to be accurate with on-disk tiering.
-     // Calculating exact logical pairs requires reading *all* data and resolving duplicates/tombstones.
-     // We can provide simpler stats for now.
+    std::cout << "--- LSM Tree Stats ---" << std::endl;
 
-    cout << "--- LSM Tree Stats ---" << endl;
+    // Data structures to hold intermediate results
+    std::map<int, std::pair<int, std::string>> logical_data; // Map<key, Pair<value, location>>
+    std::set<int> deleted_keys;                             // Keep track of keys confirmed deleted
+    std::vector<long long> physical_key_counts(MAX_LEVELS + 1, 0); // Count all keys per level file
 
-    // 1. MemTable status
-    cout << "MemTable Entries: " << memtable_ptr_->curr_size_ << "/" << memtable_ptr_->capacity_ << endl;
-    cout << "MemTable Contents (Key:Value:Tombstone): ";
-     for (int i = 0; i < memtable_ptr_->curr_size_; ++i) {
-         cout << memtable_ptr_->memtable_[i].key << ":" << memtable_ptr_->memtable_[i].value << ":" << (memtable_ptr_->memtable_[i].tombstone ? 'T' : 'F') << " ";
-    }
-    cout << endl;
+    key_value temp_kv; // Reusable buffer for reading from files
 
-    // 2. Number of runs (SSTable files) per level
-    cout << "Level Run Counts:" << endl;
-    for (int i = 1; i <= MAX_LEVELS; ++i) {
-        if (levels_[i]) {
-            cout << "  LVL" << i << ": " << levels_[i]->get_run_count() << " runs" << endl;
-            // Optionally list filenames
-             // cout << "    Files: ";
-             // for(const auto& fname : levels_[i]->sstable_files_) cout << fname << " ";
-             // cout << endl;
+    // --- Stage 1: Process data from newest to oldest to find logical state ---
+
+    // 1.a Process Memtable
+    // std::cout << "Debug: Processing Memtable..." << std::endl; // Optional debug line
+    for (int i = memtable_ptr_->curr_size_ - 1; i >= 0; --i) { // Iterate reverse for latest memtable entries first
+        const auto& kv = memtable_ptr_->memtable_[i];
+
+        // If key already processed (found newer version or deleted), skip
+        if (logical_data.count(kv.key) || deleted_keys.count(kv.key)) {
+            continue;
+        }
+
+        if (kv.tombstone) {
+            deleted_keys.insert(kv.key); // Mark as deleted, don't add to logical_data
+        } else {
+            logical_data[kv.key] = {kv.value, "M"}; // Found latest version in Memtable
         }
     }
-     cout << "----------------------" << endl;
 
-     // NOTE: Accurate 'Logical Pairs' count and 'Dump Tree' are complex.
-     // They would require a full merge simulation or reading all files.
-     cout << "NOTE: 'Logical Pairs' and 'Dump Tree' stats require reading all SSTables and are omitted in this basic version." << endl;
+    // 1.b Process Levels (from L1 down to MAX_LEVELS)
+    for (int level_num = 1; level_num <= MAX_LEVELS; ++level_num) {
+        level* current_level = levels_[level_num];
+        if (!current_level) continue; // Skip if level doesn't exist
 
+        // Process runs within the level (newest run first - reverse iteration)
+        // std::cout << "Debug: Processing Level " << level_num << "..." << std::endl; // Optional debug line
+        for (auto it = current_level->sstable_files_.rbegin(); it != current_level->sstable_files_.rend(); ++it) {
+            const std::string& filename = *it;
+            // std::cout << "Debug:   Reading file " << filename << "..." << std::endl; // Optional debug line
+
+            std::ifstream infile(filename, std::ios::binary);
+            if (!infile) {
+                std::cerr << "Warning: Could not open SSTable file for stats: " << filename << std::endl;
+                continue;
+            }
+
+            // Count physical keys while reading for logical state
+            long long current_file_key_count = 0;
+            while (infile.read(reinterpret_cast<char*>(&temp_kv), sizeof(key_value))) {
+                current_file_key_count++;
+
+                // Check if key already has a newer version or is known to be deleted
+                if (logical_data.count(temp_kv.key) || deleted_keys.count(temp_kv.key)) {
+                    continue; // Skip older/deleted versions
+                }
+
+                // This is the newest version encountered so far for this key
+                if (temp_kv.tombstone) {
+                    deleted_keys.insert(temp_kv.key); // Mark as deleted
+                } else {
+                    logical_data[temp_kv.key] = {temp_kv.value, "L" + std::to_string(level_num)}; // Store value and location
+                }
+            }
+            physical_key_counts[level_num] += current_file_key_count; // Add file's count to level total
+            infile.close();
+        }
+    }
+
+    // --- Stage 2: Print the statistics based on collected data ---
+
+    // (1) Logical Pair Count
+    // The size of logical_data map contains exactly the unique, non-deleted keys
+    std::cout << "Logical Pairs: " << logical_data.size() << std::endl;
+
+    // (2) Keys Per Level (Physical count including tombstones/stale data in files)
+    std::cout << "LVL1: " << physical_key_counts[1];
+    for (int i = 2; i <= MAX_LEVELS; ++i) {
+        std::cout << ", LVL" << i << ": " << physical_key_counts[i];
+    }
+    std::cout << std::endl;
+
+    // (3) Dump Tree (Logical view: Key:Value:Level)
+    // Iterate through the sorted map (logical_data)
+    // bool first_entry = true;
+    std::map<int, std::vector<std::pair<int, int>>> entries_by_level; // Group for printing
+
+     // Group by level first
+    for(const auto& pair : logical_data) {
+        int key = pair.first;
+        int value = pair.second.first;
+        std::string location = pair.second.second;
+        int level_num = 0; // 0 for Memtable
+        if(location != "M") {
+             try {
+                level_num = std::stoi(location.substr(1)); // Extract level number after "L"
+             } catch(...) { /* Handle potential error if location format is wrong */ }
+        }
+        entries_by_level[level_num].push_back({key, value});
+    }
+
+    // Print Memtable entries first (Level 0)
+    if(entries_by_level.count(0)) {
+        for(const auto& kv_pair : entries_by_level[0]) {
+             std::cout << kv_pair.first << ":" << kv_pair.second << ":M ";
+        }
+         std::cout << std::endl; // Newline after memtable entries
+    }
+
+
+    // Print Level entries (Level 1 to MAX_LEVELS)
+     for (int level_num = 1; level_num <= MAX_LEVELS; ++level_num) {
+         if (entries_by_level.count(level_num)) {
+             for (const auto& kv_pair : entries_by_level[level_num]) {
+                 std::cout << kv_pair.first << ":" << kv_pair.second << ":L" << level_num << " ";
+             }
+             std::cout << std::endl; // Newline after each level's entries
+         }
+     }
+
+
+    std::cout << "----------------------" << std::endl;
 }
 
 // Explicit function to delete all SSTable files
