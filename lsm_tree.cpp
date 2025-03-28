@@ -20,7 +20,8 @@ lsm_tree::lsm_tree() {
     memtable_ptr_ = new memtable();
 
     memtable_ptr_->level1ptr_ = new level(INITIAL_LEVEL_CAPACITY, 1);
-    levels_[1] = memtable_ptr_->level1ptr_; // level 1 ptr stored in 1 index
+    levels_.resize(MAX_LEVELS + 1); //Initialize the Vector!!!!
+    levels_[1] = memtable_ptr_->level1ptr_; // ptr to level 1 is stored in 1 index
 
     auto curr_level_ptr = levels_[1];
     for (int i = 2; i <= MAX_LEVELS; ++i) {
@@ -161,5 +162,53 @@ void lsm_tree::delete_key(int key) {
 }
 
 void lsm_tree::printStats() {
-    std::cout << "lsm_tree::printStats() not implemented yet!" << std::endl;
+    // (1) Number of logical key value pairs (excluding deleted/stale entries)
+    int logicalPairCount = 0;
+
+    // First, count the logical pairs in the MemTable
+    for (int i = 0; i < memtable_ptr_->curr_size_; ++i) {
+        if (!memtable_ptr_->memtable_[i].tombstone) {
+            ++logicalPairCount;
+        }
+    }
+
+    // Count logical pairs in SSTables at each level
+    vector<int> levelCounts(MAX_LEVELS + 1, 0);  // Initialize counts for each level
+    for (int i = 1; i <= MAX_LEVELS; ++i) {
+        auto curr_level_ptr = levels_[i];
+        for (int j = 0; j < curr_level_ptr->curr_size_; ++j) {
+            if (!curr_level_ptr->sstable_[j].tombstone) {
+                ++logicalPairCount;
+                ++levelCounts[i];
+            }
+        }
+    }
+
+    cout << "Logical Pairs: " << logicalPairCount << endl;
+
+    // (2) Number of keys in each level
+    cout << "LVL1: " << levelCounts[1];
+    for (int i = 2; i <= MAX_LEVELS; ++i) {
+        cout << ", LVL" << i << ": " << levelCounts[i];
+    }
+    cout << endl;
+
+    // (3) Dump the tree (key, value, level)
+    cout << "MemTable:" << endl;
+    for (int i = 0; i < memtable_ptr_->curr_size_; ++i) {
+         if (!memtable_ptr_->memtable_[i].tombstone)
+            cout << memtable_ptr_->memtable_[i].key << ":" << memtable_ptr_->memtable_[i].value << ":M ";
+    }
+
+    cout << endl;
+
+    for (int i = 1; i <= MAX_LEVELS; ++i) {
+        cout << "Level " << i << ":" << endl;
+        auto curr_level_ptr = levels_[i];
+        for (int j = 0; j < curr_level_ptr->curr_size_; ++j) {
+           if (!curr_level_ptr->sstable_[j].tombstone)
+              cout << curr_level_ptr->sstable_[j].key << ":" << curr_level_ptr->sstable_[j].value << ":L" << i << " ";
+        }
+        cout << endl;
+    }
 }

@@ -48,6 +48,7 @@
         "list": "cpp",
         "unordered_set": "cpp",
         "*.tcc": "cpp",
-        "__split_buffer": "cpp"
+        "__split_buffer": "cpp",
+        "atomic": "cpp"
     }
 }
