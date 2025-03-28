@@ -38,9 +38,8 @@ test.o: test.cpp lsm_tree.hh
 
 # Clean up executables, object files, and generated SSTable files
 clean:
-	rm -f $(TARGET) $(TEST_TARGET) $(OBJECTS) test.o # Remove specific objs
-	# Add command to remove SSTable files (use shell wildcard)
-	rm -f level_*.sst
+	rm -f $(TARGET) $(TEST_TARGET) $(OBJECTS) test.o
+	rm -rf $(DATA_DIR)
 
 # Phony targets
 .PHONY: all clean

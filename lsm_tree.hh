@@ -12,7 +12,7 @@ const int INITIAL_LEVEL_CAPACITY = 10; // Initial capacity of Level 1 (less rele
 const int SIZE_RATIO = 2;         // Tiering Threshold: Merge when a level has this many runs
 const int MAX_LEVELS = 4;         // Maximum number of levels
 const std::string SST_FILE_PREFIX = "level_";
-const std::string SST_FILE_SUFFIX = ".sst";
+const std::string SST_FILE_SUFFIX = ".txt";
 
 // --- Data Structures ---
 

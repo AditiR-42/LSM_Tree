@@ -9,8 +9,39 @@
 #include <limits> 
 #include <map> 
 #include <set>
+#include <sys/stat.h> // For mkdir, stat
+#include <sys/types.h>
+#include <unistd.h>   // For access (check file existence)
+#include <dirent.h>   // For opendir, readdir, closedir
 
 using namespace std;
+
+// --- Define data directory constant ---
+const std::string DATA_DIR = "data";
+
+// --- Helper Function (Example - needs error checking) ---
+bool directory_exists(const std::string& path) {
+    struct stat info;
+    if (stat(path.c_str(), &info) != 0) {
+        return false; // Cannot access
+    }
+    return (info.st_mode & S_IFDIR) != 0; // Check if it's a directory
+}
+
+bool create_directory(const std::string& path) {
+    // Mode 0755 (rwxr-xr-x) - adjust if needed
+    if (mkdir(path.c_str(), 0755) == 0) {
+        std::cout << "Created directory: " << path << std::endl;
+        return true;
+    } else {
+        // Check if it already exists (EEXIST is okay)
+        if (errno == EEXIST && directory_exists(path)) {
+            return true; // Already exists, that's fine
+        }
+        std::cerr << "Error creating directory " << path << ": " << strerror(errno) << std::endl;
+        return false;
+    }
+}
 
 // --- Helper Struct for Merge ---
 struct merge_entry {
@@ -48,26 +79,37 @@ bool level::find_key(int key, int& value, bool& is_tombstone) {
     // Search runs in reverse order (newest first)
     for (auto it = sstable_files_.rbegin(); it != sstable_files_.rend(); ++it) {
         const std::string& filename = *it;
-        ifstream infile(filename, ios::binary);
+        // Open in text mode (default)
+        std::ifstream infile(filename);
         if (!infile) {
-            cerr << "Error: Could not open SSTable file for reading: " << filename << endl;
+            std::cerr << "Warning: Could not open SSTable TXT file for reading: " << filename << std::endl;
             continue; // Skip this file if it can't be opened
         }
 
-        key_value current_kv;
-        // Read file sequentially (can be optimized with index blocks/binary search later)
-        while (infile.read(reinterpret_cast<char*>(&current_kv), sizeof(key_value))) {
-            if (current_kv.key == key) {
-                value = current_kv.value;
-                is_tombstone = current_kv.tombstone;
+        int current_key;
+        int current_value;
+        int tombstone_flag; // Read tombstone as 0 or 1
+
+        // Read file line by line, parsing space-separated values
+        while (infile >> current_key >> current_value >> tombstone_flag) {
+            if (current_key == key) {
+                value = current_value;
+                is_tombstone = (tombstone_flag == 1); // Convert 0/1 back to bool
                 infile.close();
                 return true; // Key found
             }
             // Optimization: If we pass the key in a sorted file, it won't be found later in this file
-            if (current_kv.key > key) {
-                 break; // Stop reading this file
+            if (current_key > key) {
+                 // Since the file is sorted, no need to read further in *this* file
+                 break;
             }
         }
+
+        // Check for read errors that didn't result in EOF
+        if (!infile.eof() && infile.fail()) {
+             std::cerr << "Warning: Read error or parsing issue in SSTable TXT file: " << filename << std::endl;
+        }
+
         infile.close(); // Close the file stream
     }
     return false; // Key not found in any run of this level
@@ -130,21 +172,73 @@ bool memtable::find_key(int key, int& value, bool& is_tombstone) {
 
 
 // --- LSM_Tree Class Implementation ---
-lsm_tree::lsm_tree() {
+lsm_tree::lsm_tree() : next_run_id_(0) { // Initialize next_run_id_
     memtable_ptr_ = new memtable();
-    levels_.resize(MAX_LEVELS + 1, nullptr); // Initialize vector with nullptrs
+    levels_.resize(MAX_LEVELS + 1, nullptr);
 
-    // Create levels
-    int current_capacity = INITIAL_LEVEL_CAPACITY;
+    // 1. Create root data directory
+    if (!create_directory(DATA_DIR)) {
+        // Handle critical error - cannot proceed without data directory
+        throw std::runtime_error("Failed to create or access data directory: " + DATA_DIR);
+    }
+
+    long long max_run_id_found = -1;
+
+    // 2. Create levels and load existing SSTables
+    int current_capacity = INITIAL_LEVEL_CAPACITY; // Capacity logic might be less relevant now
     for (int i = 1; i <= MAX_LEVELS; ++i) {
         levels_[i] = new level(current_capacity, i);
         if (i > 1) {
             levels_[i-1]->next_ = levels_[i];
         }
-        // Capacity scaling isn't strictly enforced by tiering run count,
-        // but can be used as a guideline or for future policies.
-        current_capacity *= SIZE_RATIO; // Or another scaling factor
+
+        // Create level subdirectory
+        std::string level_dir = DATA_DIR + "/L" + std::to_string(i);
+        if (!create_directory(level_dir)) {
+             throw std::runtime_error("Failed to create or access level directory: " + level_dir);
+        }
+
+        // --- Load existing files for this level ---
+        DIR *dirp = opendir(level_dir.c_str());
+        if (dirp) {
+            struct dirent *dp;
+            while ((dp = readdir(dirp)) != nullptr) {
+                std::string filename = dp->d_name;
+                // Check if it's an SST file (simple check)
+                if (filename.length() > 4 && filename.substr(filename.length() - 4) == SST_FILE_SUFFIX) {
+                    std::string full_path = level_dir + "/" + filename;
+                    levels_[i]->add_run(full_path); // Add full path
+                    std::cout << "Found existing SSTable: " << full_path << std::endl;
+
+                    // Parse run ID from filename (e.g., "run_123.sst") - basic example
+                    size_t run_pos = filename.find("run_");
+                    size_t sst_pos = filename.rfind(SST_FILE_SUFFIX);
+                    if (run_pos != std::string::npos && sst_pos != std::string::npos) {
+                         try {
+                             long long run_id = std::stoll(filename.substr(run_pos + 4, sst_pos - (run_pos + 4)));
+                             if (run_id > max_run_id_found) {
+                                 max_run_id_found = run_id;
+                             }
+                         } catch (...) {
+                              std::cerr << "Warning: Could not parse run ID from filename: " << filename << std::endl;
+                         }
+                    }
+                }
+            }
+            closedir(dirp);
+        } else {
+             std::cerr << "Warning: Could not open level directory for reading: " << level_dir << std::endl;
+        }
+        // Sort runs after loading? Maybe by run_id if needed, but order added matters for tiering.
+        // For tiering, the order usually doesn't strictly matter as they all get merged.
+        // For lookup, searching newest (highest run_id) first might be desired. This requires sorting or smarter loading.
+
+        current_capacity *= SIZE_RATIO;
     }
+
+     // Set the next run ID to be one greater than the highest found
+    next_run_id_ = max_run_id_found + 1;
+    std::cout << "Starting next run ID at: " << next_run_id_ << std::endl;
 }
 
 lsm_tree::~lsm_tree() {
@@ -152,101 +246,100 @@ lsm_tree::~lsm_tree() {
     for (int i = 1; i <= MAX_LEVELS; ++i) {
         delete levels_[i];
     }
-    // Consider adding cleanup_files() here if desired on program exit
-    // cleanup_files();
 }
+
 
 // Helper to generate unique SSTable filenames
 std::string lsm_tree::generate_sstable_filename(int level_num) {
-    return SST_FILE_PREFIX + std::to_string(level_num) + "_run_" + std::to_string(next_run_id_++) + SST_FILE_SUFFIX;
+    // Construct path: DATA_DIR / L<level_num> / run_<id>.sst
+    std::string level_dir = DATA_DIR + "/L" + std::to_string(level_num);
+    return level_dir + "/run_" + std::to_string(next_run_id_++) + SST_FILE_SUFFIX;
 }
 
 // Helper to write sorted data to an SSTable file
 bool lsm_tree::write_sstable(const std::vector<key_value>& data, const std::string& filename) {
-    // Open file in binary mode for writing
-    ofstream outfile(filename, ios::binary | ios::trunc); // Trunc ensures it's a new file or overwrites
+    // Open file in text mode (default) for writing
+    // ios::trunc ensures it's a new file or overwrites
+    std::ofstream outfile(filename, std::ios::trunc);
     if (!outfile) {
-        cerr << "Error: Could not open SSTable file for writing: " << filename << endl;
+        std::cerr << "Error: Could not open SSTable TXT file for writing: " << filename << std::endl;
         return false;
     }
 
-    // Write data block by block (or element by element for simplicity here)
+    // Write each key-value pair as a line of text
     for (const auto& kv : data) {
-        outfile.write(reinterpret_cast<const char*>(&kv), sizeof(key_value));
-        if (!outfile) {
-             cerr << "Error: Failed to write to SSTable file: " << filename << endl;
+        outfile << kv.key << " " << kv.value << " " << (kv.tombstone ? 1 : 0) << "\n";
+        if (!outfile) { // Check stream state after each write
+             std::cerr << "Error: Failed to write to SSTable TXT file: " << filename << std::endl;
              outfile.close();
              return false;
         }
     }
 
     outfile.close();
-    if (!outfile) { // Check close status
-         cerr << "Error: Failed to close SSTable file properly: " << filename << endl;
-         return false; // File might be corrupted
+    if (!outfile) { // Check close status (important!)
+         std::cerr << "Error: Failed to close SSTable TXT file properly: " << filename << std::endl;
+         // File might be corrupted or incomplete even if writes seemed okay.
+         return false;
     }
-    cout << "Successfully wrote SSTable: " << filename << endl;
+    std::cout << "Successfully wrote SSTable TXT: " << filename << std::endl;
     return true;
 }
 
 // Helper to delete SSTable files
 void lsm_tree::delete_sst_files(const std::vector<std::string>& filenames) {
     for (const auto& filename : filenames) {
+        // Filenames should now be full paths
         if (std::remove(filename.c_str()) != 0) {
-            cerr << "Warning: Could not delete SSTable file: " << filename << endl;
+            // Use perror or strerror(errno) for better error reporting
+            std::cerr << "Warning: Could not delete SSTable file: " << filename << " (" << strerror(errno) << ")" << std::endl;
         } else {
-             cout << "Deleted old SSTable: " << filename << endl;
+             std::cout << "Deleted old SSTable: " << filename << std::endl;
         }
     }
 }
-
 // --- Merge Logic ---
 // Performs a k-way merge on the given run files, writes result to a new file, returns new filename.
+// Performs a k-way merge on the given run TXT files, writes result to a new TXT file.
 std::string lsm_tree::merge_runs(int target_level_num, const std::vector<std::string>& runs_to_merge) {
-    if (runs_to_merge.empty()) {
-        return ""; // Should not happen in tiering merge typically
-    }
-    if (target_level_num > MAX_LEVELS) {
-        cerr << "Error: Cannot merge into level " << target_level_num << " (max level is " << MAX_LEVELS << ")" << endl;
-        // Handle this error - maybe discard data, maybe log and stop?
-        // For now, just return empty, indicating failure.
-        return "";
-    }
+    // ... (initial checks for empty runs, target_level_num remain same) ...
 
+    std::cout << "Merging " << runs_to_merge.size() << " TXT runs into level " << target_level_num << "..." << std::endl;
 
-    cout << "Merging " << runs_to_merge.size() << " runs into level " << target_level_num << "..." << endl;
-
-    std::vector<ifstream> input_streams;
+    std::vector<std::ifstream> input_streams;
     input_streams.reserve(runs_to_merge.size());
 
-    // Min-heap to manage the next available element from each run
     priority_queue<merge_entry, vector<merge_entry>, greater<merge_entry>> min_heap;
 
-    // Open all input files and read the first element from each
+    // Open all input TEXT files and read the first entry from each
     for (size_t i = 0; i < runs_to_merge.size(); ++i) {
-        input_streams.emplace_back(runs_to_merge[i], ios::binary);
+        // Open in text mode (default)
+        input_streams.emplace_back(runs_to_merge[i]);
         if (!input_streams.back()) {
-            cerr << "Error: Could not open file for merge: " << runs_to_merge[i] << endl;
-            // Cleanup: Close already opened streams
+            std::cerr << "Error: Could not open TXT file for merge: " << runs_to_merge[i] << std::endl;
             for(auto& stream : input_streams) if(stream.is_open()) stream.close();
             return ""; // Indicate merge failure
         }
 
-        key_value kv;
-        if (input_streams.back().read(reinterpret_cast<char*>(&kv), sizeof(key_value))) {
-            min_heap.push({kv, i});
+        int current_key, current_value, tombstone_flag;
+        // Read the first line
+        if (input_streams.back() >> current_key >> current_value >> tombstone_flag) {
+            min_heap.push({{current_key, current_value, (tombstone_flag == 1)}, i}); // Construct key_value and push
         } else {
-            // File might be empty, just close it. It won't participate further.
+            // File might be empty or failed initial read
+             if (!input_streams.back().eof()) { // Check if it wasn't just an empty file
+                 std::cerr << "Warning: Failed initial read from TXT file: " << runs_to_merge[i] << std::endl;
+             }
              input_streams.back().close();
         }
     }
 
-    // Generate filename for the new merged run in the *target* level
+    // Generate filename for the new merged run (will have .txt suffix)
     std::string output_filename = generate_sstable_filename(target_level_num);
-    ofstream outfile(output_filename, ios::binary | ios::trunc);
+    // Open output in text mode
+    std::ofstream outfile(output_filename, std::ios::trunc);
     if (!outfile) {
-        cerr << "Error: Could not open output file for merge: " << output_filename << endl;
-        // Cleanup: Close input streams
+        std::cerr << "Error: Could not open output TXT file for merge: " << output_filename << std::endl;
         for(auto& stream : input_streams) if(stream.is_open()) stream.close();
         return ""; // Indicate merge failure
     }
@@ -259,48 +352,39 @@ std::string lsm_tree::merge_runs(int target_level_num, const std::vector<std::st
         merge_entry smallest = min_heap.top();
         min_heap.pop();
 
-        // --- Compaction/Duplicate Handling ---
-        // Only write the key if it's different from the last written key.
-        // If keys are the same, the one processed first (from heap) is considered 'newer'
-        // due to how levels/runs are typically ordered or based on tie-breaking.
-        // Also, propagate tombstones unless a newer value for the same key appears.
+        // --- Compaction/Duplicate Handling (Logic remains same, writing changes) ---
         if (first_write || smallest.kv.key != last_written_kv.key) {
-             // Only write non-tombstones from the *final* level merge if needed (optional optimization)
-             // For now, write everything to maintain history correctly for lookups
-            outfile.write(reinterpret_cast<const char*>(&smallest.kv), sizeof(key_value));
+            // --- Write using TEXT format ---
+            outfile << smallest.kv.key << " " << smallest.kv.value << " " << (smallest.kv.tombstone ? 1 : 0) << "\n";
+            if (!outfile) {
+                std::cerr << "Error writing during merge to TXT file: " << output_filename << std::endl;
+                // Cleanup needed
+                 outfile.close();
+                 for(auto& stream : input_streams) if(stream.is_open()) stream.close();
+                 std::remove(output_filename.c_str()); // Attempt to remove bad output file
+                 return ""; // Indicate failure
+            }
+            // --- End Text Write ---
             last_written_kv = smallest.kv;
             first_write = false;
         } else {
-             // Duplicate key. The one already processed (last_written_kv) takes precedence.
-             // If the new one (smallest.kv) is a tombstone and the last written wasn't,
-             // the tombstone should ideally win if it's logically 'newer'.
-             // Our simple heap doesn't track time, but level order gives some precedence.
-             // If last_written was not a tombstone, but smallest.kv IS a tombstone for same key:
+             // Duplicate key logic (no writing, just update last_written_kv if needed)
              if (!last_written_kv.tombstone && smallest.kv.tombstone) {
-                 // Overwrite the previous entry requires seeking back, which is complex.
-                 // Standard approach: Just write the tombstone. Lookups find the latest version.
-                 // Seek back and overwrite (more complex, less common):
-                 // outfile.seekp(-static_cast<std::streamoff>(sizeof(key_value)), ios::cur);
-                 // outfile.write(reinterpret_cast<const char*>(&smallest.kv), sizeof(key_value));
-                 // last_written_kv = smallest.kv; // Update last written
-
-                 // Simpler: write the tombstone anyway. The latest read wins during GET.
-                 // But to avoid redundant entries, we just *update* last_written_kv
-                 // and rely on the *next* distinct key write.
-                 last_written_kv = smallest.kv; // This tombstone now shadows the previous value
+                 last_written_kv = smallest.kv; // Update tombstone status
              }
-             // Else (newest is not tombstone, or both are tombstones), keep last_written_kv.
         }
 
-
-        // Read the next element from the same stream the smallest element came from
+        // Read the next element (line) from the same stream
         size_t stream_idx = smallest.stream_index;
         if (input_streams[stream_idx].is_open() && !input_streams[stream_idx].eof()) {
-             key_value next_kv;
-             if (input_streams[stream_idx].read(reinterpret_cast<char*>(&next_kv), sizeof(key_value))) {
-                 min_heap.push({next_kv, stream_idx});
+             int next_key, next_value, next_tombstone_flag;
+             if (input_streams[stream_idx] >> next_key >> next_value >> next_tombstone_flag) {
+                 min_heap.push({{next_key, next_value, (next_tombstone_flag == 1)}, stream_idx});
              } else {
                  // End of this stream reached or read error
+                 if (!input_streams[stream_idx].eof() && input_streams[stream_idx].fail()) {
+                     std::cerr << "Warning: Read error or parsing issue mid-merge in file: " << runs_to_merge[stream_idx] << std::endl;
+                 }
                  input_streams[stream_idx].close();
              }
         }
@@ -309,21 +393,20 @@ std::string lsm_tree::merge_runs(int target_level_num, const std::vector<std::st
     // Close output file
     outfile.close();
     if (!outfile) { // Check close status
-        cerr << "Error closing merged output file: " << output_filename << endl;
-         // Attempt to delete potentially corrupted output file
+        std::cerr << "Error closing merged output TXT file: " << output_filename << std::endl;
          std::remove(output_filename.c_str());
          return ""; // Indicate failure
     }
 
-    // Close any remaining input streams (should be closed already if read fully)
+    // Close any remaining input streams
     for (auto& stream : input_streams) {
         if (stream.is_open()) {
             stream.close();
         }
     }
 
-    cout << "Merge complete. New run: " << output_filename << endl;
-    return output_filename; // Return the name of the newly created merged file
+    std::cout << "Merge complete. New TXT run: " << output_filename << std::endl;
+    return output_filename; // Return the name of the newly created merged TXT file
 }
 
 
@@ -539,35 +622,42 @@ void lsm_tree::printStats() {
         if (!current_level) continue; // Skip if level doesn't exist
 
         // Process runs within the level (newest run first - reverse iteration)
-        // std::cout << "Debug: Processing Level " << level_num << "..." << std::endl; // Optional debug line
         for (auto it = current_level->sstable_files_.rbegin(); it != current_level->sstable_files_.rend(); ++it) {
             const std::string& filename = *it;
             // std::cout << "Debug:   Reading file " << filename << "..." << std::endl; // Optional debug line
 
-            std::ifstream infile(filename, std::ios::binary);
+            // Open in text mode
+            std::ifstream infile(filename);
             if (!infile) {
-                std::cerr << "Warning: Could not open SSTable file for stats: " << filename << std::endl;
+                std::cerr << "Warning: Could not open SSTable TXT file for stats: " << filename << std::endl;
                 continue;
             }
 
-            // Count physical keys while reading for logical state
             long long current_file_key_count = 0;
-            while (infile.read(reinterpret_cast<char*>(&temp_kv), sizeof(key_value))) {
+            int current_key, current_value, tombstone_flag;
+
+            // Read using text extraction
+            while (infile >> current_key >> current_value >> tombstone_flag) {
                 current_file_key_count++;
+                bool current_tombstone = (tombstone_flag == 1);
 
                 // Check if key already has a newer version or is known to be deleted
-                if (logical_data.count(temp_kv.key) || deleted_keys.count(temp_kv.key)) {
+                if (logical_data.count(current_key) || deleted_keys.count(current_key)) {
                     continue; // Skip older/deleted versions
                 }
 
                 // This is the newest version encountered so far for this key
-                if (temp_kv.tombstone) {
-                    deleted_keys.insert(temp_kv.key); // Mark as deleted
+                if (current_tombstone) {
+                    deleted_keys.insert(current_key); // Mark as deleted
                 } else {
-                    logical_data[temp_kv.key] = {temp_kv.value, "L" + std::to_string(level_num)}; // Store value and location
+                    logical_data[current_key] = {current_value, "L" + std::to_string(level_num)}; // Store value and location
                 }
             }
-            physical_key_counts[level_num] += current_file_key_count; // Add file's count to level total
+            if (!infile.eof() && infile.fail()) {
+                std::cerr << "Warning: Read error or parsing issue during stats in file: " << filename << std::endl;
+            }
+
+            physical_key_counts[level_num] += current_file_key_count;
             infile.close();
         }
     }
@@ -629,13 +719,39 @@ void lsm_tree::printStats() {
 
 // Explicit function to delete all SSTable files
 void lsm_tree::cleanup_files() {
-    cout << "Cleaning up SSTable files..." << endl;
+    std::cout << "Cleaning up ALL SSTable files and directories..." << std::endl;
     for (int i = 1; i <= MAX_LEVELS; ++i) {
         if (levels_[i]) {
+             // Delete files stored in memory first
             delete_sst_files(levels_[i]->sstable_files_);
-            levels_[i]->sstable_files_.clear(); // Clear the list in memory too
+            levels_[i]->sstable_files_.clear(); // Clear the list in memory
+
+            // Optionally remove the directory itself
+            std::string level_dir = DATA_DIR + "/L" + std::to_string(i);
+             // Careful with recursive delete! Basic remove dir:
+             if (rmdir(level_dir.c_str()) != 0) {
+                 if (errno != ENOTEMPTY) { // Ignore error if dir not empty (we just deleted files)
+                      std::cerr << "Warning: Could not remove directory " << level_dir << ": " << strerror(errno) << std::endl;
+                 } else {
+                     // If you want to force remove non-empty dirs, you need a recursive function or system("rm -rf ...") (use with caution!)
+                     std::cerr << "Info: Directory not empty, not removed: " << level_dir << std::endl;
+                 }
+             } else {
+                 std::cout << "Removed directory: " << level_dir << std::endl;
+             }
         }
     }
-     // Also reset the run ID generator if starting fresh
+    // Optionally remove the root data directory
+    if (rmdir(DATA_DIR.c_str()) != 0) {
+         if (errno != ENOTEMPTY) {
+             std::cerr << "Warning: Could not remove root data directory " << DATA_DIR << ": " << strerror(errno) << std::endl;
+         } else {
+              std::cerr << "Info: Root data directory not empty, not removed: " << DATA_DIR << std::endl;
+         }
+    } else {
+        std::cout << "Removed directory: " << DATA_DIR << std::endl;
+    }
+
+     // Reset run ID generator
      next_run_id_ = 0;
 }
