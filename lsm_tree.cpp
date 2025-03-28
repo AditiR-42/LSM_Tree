@@ -757,12 +757,10 @@ void lsm_tree::cleanup_files() {
 
             // Optionally remove the directory itself
             std::string level_dir = DATA_DIR + "/L" + std::to_string(i);
-             // Careful with recursive delete! Basic remove dir:
              if (rmdir(level_dir.c_str()) != 0) {
-                 if (errno != ENOTEMPTY) { // Ignore error if dir not empty (we just deleted files)
+                 if (errno != ENOTEMPTY) { 
                       std::cerr << "Warning: Could not remove directory " << level_dir << ": " << strerror(errno) << std::endl;
                  } else {
-                     // If you want to force remove non-empty dirs, you need a recursive function or system("rm -rf ...") (use with caution!)
                      std::cerr << "Info: Directory not empty, not removed: " << level_dir << std::endl;
                  }
              } else {

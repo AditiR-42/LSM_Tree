@@ -7,10 +7,10 @@
 #include <fstream>
 
 // --- Constants ---
-const int MEMTABLE_CAPACITY = 50;               // Example capacity
-const int INITIAL_LEVEL_CAPACITY = 10;          // Initial capacity of Level 1
-const int SIZE_RATIO = 5;                       // Tiering Threshold: Merge when a level has this many runs
-const int MAX_LEVELS = 10;                      // Maximum number of levels
+const int MEMTABLE_CAPACITY = 50;               
+const int INITIAL_LEVEL_CAPACITY = 10;          
+const int SIZE_RATIO = 5;                       
+const int MAX_LEVELS = 10;                     
 const std::string SST_FILE_PREFIX = "level_";
 const std::string SST_FILE_SUFFIX = ".txt";
 
