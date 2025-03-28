@@ -9,10 +9,10 @@
 #include <limits> 
 #include <map> 
 #include <set>
-#include <sys/stat.h> // For mkdir, stat
+#include <sys/stat.h>
 #include <sys/types.h>
-#include <unistd.h>   // For access (check file existence)
-#include <dirent.h>   // For opendir, readdir, closedir
+#include <unistd.h> 
+#include <dirent.h> 
 
 using namespace std;
 
@@ -31,7 +31,7 @@ bool directory_exists(const std::string& path) {
 bool create_directory(const std::string& path) {
     // Mode 0755 (rwxr-xr-x) - adjust if needed
     if (mkdir(path.c_str(), 0755) == 0) {
-        std::cout << "Created directory: " << path << std::endl;
+        // std::cout << "Created directory: " << path << std::endl;
         return true;
     } else {
         // Check if it already exists (EEXIST is okay)
@@ -51,7 +51,6 @@ struct merge_entry {
     // Custom comparator for min-heap (priority queue) based on key
     bool operator>(const merge_entry& other) const {
         // If keys are equal, prefer the one from the lower stream index (arbitrary but consistent)
-        // In a real system, you might prefer based on sequence number if available.
         if (kv.key == other.kv.key) {
             return stream_index > other.stream_index; // Or some other tie-breaker
         }
@@ -208,7 +207,7 @@ lsm_tree::lsm_tree() : next_run_id_(0) { // Initialize next_run_id_
                 if (filename.length() > 4 && filename.substr(filename.length() - 4) == SST_FILE_SUFFIX) {
                     std::string full_path = level_dir + "/" + filename;
                     levels_[i]->add_run(full_path); // Add full path
-                    std::cout << "Found existing SSTable: " << full_path << std::endl;
+                    // std::cout << "Found existing SSTable: " << full_path << std::endl;
 
                     // Parse run ID from filename (e.g., "run_123.sst") - basic example
                     size_t run_pos = filename.find("run_");
@@ -238,12 +237,12 @@ lsm_tree::lsm_tree() : next_run_id_(0) { // Initialize next_run_id_
 
      // Set the next run ID to be one greater than the highest found
     next_run_id_ = max_run_id_found + 1;
-    std::cout << "Starting next run ID at: " << next_run_id_ << std::endl;
+    // std::cout << "Starting next run ID at: " << next_run_id_ << std::endl;
 }
 
 lsm_tree::~lsm_tree() {
     if (memtable_ptr_ && memtable_ptr_->curr_size_ > 0) {
-        std::cout << "LSM Tree Destructor: Memtable not empty, performing final flush..." << std::endl;
+        // std::cout << "LSM Tree Destructor: Memtable not empty, performing final flush..." << std::endl;
         std::vector<key_value> data_to_flush = memtable_ptr_->flush(); // Flush remaining data
 
         if (!data_to_flush.empty()) {
@@ -263,7 +262,7 @@ lsm_tree::~lsm_tree() {
                  // Consider if check_and_trigger_merge(1) should be called here.
                  // Usually, shutdown flushes just write the file and don't trigger further compactions.
             } else {
-                 std::cerr << "Error: Failed to write final memtable flush to disk during shutdown!" << std::endl;
+                //  std::cerr << "Error: Failed to write final memtable flush to disk during shutdown!" << std::endl;
             }
         }
     }
@@ -292,7 +291,7 @@ bool lsm_tree::write_sstable(const std::vector<key_value>& data, const std::stri
     // ios::trunc ensures it's a new file or overwrites
     std::ofstream outfile(filename, std::ios::trunc);
     if (!outfile) {
-        std::cerr << "Error: Could not open SSTable TXT file for writing: " << filename << std::endl;
+        // std::cerr << "Error: Could not open SSTable TXT file for writing: " << filename << std::endl;
         return false;
     }
 
@@ -300,7 +299,7 @@ bool lsm_tree::write_sstable(const std::vector<key_value>& data, const std::stri
     for (const auto& kv : data) {
         outfile << kv.key << " " << kv.value << " " << (kv.tombstone ? 1 : 0) << "\n";
         if (!outfile) { // Check stream state after each write
-             std::cerr << "Error: Failed to write to SSTable TXT file: " << filename << std::endl;
+            //  std::cerr << "Error: Failed to write to SSTable TXT file: " << filename << std::endl;
              outfile.close();
              return false;
         }
@@ -308,11 +307,11 @@ bool lsm_tree::write_sstable(const std::vector<key_value>& data, const std::stri
 
     outfile.close();
     if (!outfile) { // Check close status (important!)
-         std::cerr << "Error: Failed to close SSTable TXT file properly: " << filename << std::endl;
+        //  std::cerr << "Error: Failed to close SSTable TXT file properly: " << filename << std::endl;
          // File might be corrupted or incomplete even if writes seemed okay.
          return false;
     }
-    std::cout << "Successfully wrote SSTable TXT: " << filename << std::endl;
+    // std::cout << "Successfully wrote SSTable TXT: " << filename << std::endl;
     return true;
 }
 
@@ -322,9 +321,9 @@ void lsm_tree::delete_sst_files(const std::vector<std::string>& filenames) {
         // Filenames should now be full paths
         if (std::remove(filename.c_str()) != 0) {
             // Use perror or strerror(errno) for better error reporting
-            std::cerr << "Warning: Could not delete SSTable file: " << filename << " (" << strerror(errno) << ")" << std::endl;
+            // std::cerr << "Warning: Could not delete SSTable file: " << filename << " (" << strerror(errno) << ")" << std::endl;
         } else {
-             std::cout << "Deleted old SSTable: " << filename << std::endl;
+            //  std::cout << "Deleted old SSTable: " << filename << std::endl;
         }
     }
 }
@@ -334,7 +333,7 @@ void lsm_tree::delete_sst_files(const std::vector<std::string>& filenames) {
 std::string lsm_tree::merge_runs(int target_level_num, const std::vector<std::string>& runs_to_merge) {
     // ... (initial checks for empty runs, target_level_num remain same) ...
 
-    std::cout << "Merging " << runs_to_merge.size() << " TXT runs into level " << target_level_num << "..." << std::endl;
+    // std::cout << "Merging " << runs_to_merge.size() << " TXT runs into level " << target_level_num << "..." << std::endl;
 
     std::vector<std::ifstream> input_streams;
     input_streams.reserve(runs_to_merge.size());
@@ -346,7 +345,7 @@ std::string lsm_tree::merge_runs(int target_level_num, const std::vector<std::st
         // Open in text mode (default)
         input_streams.emplace_back(runs_to_merge[i]);
         if (!input_streams.back()) {
-            std::cerr << "Error: Could not open TXT file for merge: " << runs_to_merge[i] << std::endl;
+            // std::cerr << "Error: Could not open TXT file for merge: " << runs_to_merge[i] << std::endl;
             for(auto& stream : input_streams) if(stream.is_open()) stream.close();
             return ""; // Indicate merge failure
         }
@@ -369,7 +368,7 @@ std::string lsm_tree::merge_runs(int target_level_num, const std::vector<std::st
     // Open output in text mode
     std::ofstream outfile(output_filename, std::ios::trunc);
     if (!outfile) {
-        std::cerr << "Error: Could not open output TXT file for merge: " << output_filename << std::endl;
+        // std::cerr << "Error: Could not open output TXT file for merge: " << output_filename << std::endl;
         for(auto& stream : input_streams) if(stream.is_open()) stream.close();
         return ""; // Indicate merge failure
     }
@@ -435,7 +434,7 @@ std::string lsm_tree::merge_runs(int target_level_num, const std::vector<std::st
         }
     }
 
-    std::cout << "Merge complete. New TXT run: " << output_filename << std::endl;
+    // std::cout << "Merge complete. New TXT run: " << output_filename << std::endl;
     return output_filename; // Return the name of the newly created merged TXT file
 }
 
@@ -450,7 +449,7 @@ void lsm_tree::check_and_trigger_merge(int level_num) {
 
     // Check if the current level needs merging (tiering threshold reached)
     if (current_level->get_run_count() >= SIZE_RATIO) {
-        cout << "Level " << level_num << " reached threshold (" << current_level->get_run_count() << "/" << SIZE_RATIO << "). Triggering merge." << endl;
+        // cout << "Level " << level_num << " reached threshold (" << current_level->get_run_count() << "/" << SIZE_RATIO << "). Triggering merge." << endl;
 
         // Prepare list of files to merge (all files in the current level)
         std::vector<std::string> files_to_merge = current_level->sstable_files_;
@@ -491,14 +490,14 @@ void lsm_tree::check_and_trigger_merge(int level_num) {
                        // for the last level. A common approach is the last level uses leveling.
                        // For simple tiering, we might just let the last level grow.
                        levels_[MAX_LEVELS]->add_run(merged_filename); // Add it back if needed
-                       cout << "Warning: Merge occurred at MAX level. Result added back to MAX level." << endl;
+                    //    cout << "Warning: Merge occurred at MAX level. Result added back to MAX level." << endl;
                   }
 
 
              }
 
         } else {
-            cerr << "Error: Merge failed for level " << level_num << ". Files remain." << endl;
+            // cerr << "Error: Merge failed for level " << level_num << ". Files remain." << endl;
             // Decide on error handling - retry? Stop? Log?
         }
     }
@@ -512,7 +511,7 @@ bool lsm_tree::insert(key_value kv_pair) {
     if (!memtable_ptr_->insert(kv_pair)) {
         // Memtable is full, need to flush it
 
-        cout << "Memtable full. Flushing to Level 1..." << endl;
+        // cout << "Memtable full. Flushing to Level 1..." << endl;
         std::vector<key_value> data_to_flush = memtable_ptr_->flush();
 
         if (!data_to_flush.empty()) {
@@ -527,26 +526,26 @@ bool lsm_tree::insert(key_value kv_pair) {
                 // Check if Level 1 needs merging now
                 check_and_trigger_merge(1);
             } else {
-                 cerr << "Error: Failed to write flushed memtable to disk. Data potentially lost." << endl;
+                //  cerr << "Error: Failed to write flushed memtable to disk. Data potentially lost." << endl;
                  // Error handling: what to do? Retry? Stop? Log? Maybe try inserting again?
                  // For now, we proceed but the data from this flush is lost.
                  // Re-insert the current kv_pair might be needed if it wasn't the cause of the flush.
                  // We need to insert the original kv_pair *after* the flush attempt.
                  bool retry_insert = memtable_ptr_->insert(kv_pair); // Try inserting the triggering pair again
                  if(!retry_insert){
-                    cerr << "Critical Error: Cannot insert into empty memtable after flush failure." << endl;
+                    // cerr << "Critical Error: Cannot insert into empty memtable after flush failure." << endl;
                     return false; // Indicate failure
                  }
                  return true; // Insert succeeded after handling flush failure (partially)
             }
         } else {
-             cout << "Memtable was full but flush returned no data??" << endl;
+            //  cout << "Memtable was full but flush returned no data??" << endl;
         }
 
         // After successful flush (or handled failure), try inserting the original pair again
         // (it wasn't added because insert returned false)
         if (!memtable_ptr_->insert(kv_pair)) {
-             cerr << "Critical Error: Could not insert element into memtable even after flushing." << endl;
+            //  cerr << "Critical Error: Could not insert element into memtable even after flushing." << endl;
              return false; // Should not happen if flush worked
         }
     }
@@ -659,7 +658,7 @@ void lsm_tree::printStats() {
             // Open in text mode
             std::ifstream infile(filename);
             if (!infile) {
-                std::cerr << "Warning: Could not open SSTable TXT file for stats: " << filename << std::endl;
+                // std::cerr << "Warning: Could not open SSTable TXT file for stats: " << filename << std::endl;
                 continue;
             }
 

@@ -4,13 +4,13 @@
 
 #include <vector>
 #include <string>
-#include <fstream> // Include for file operations
+#include <fstream>
 
 // --- Constants ---
-const int MEMTABLE_CAPACITY = 10; // Example capacity
-const int INITIAL_LEVEL_CAPACITY = 10; // Initial capacity of Level 1 (less relevant now)
-const int SIZE_RATIO = 2;         // Tiering Threshold: Merge when a level has this many runs
-const int MAX_LEVELS = 4;         // Maximum number of levels
+const int MEMTABLE_CAPACITY = 50;               // Example capacity
+const int INITIAL_LEVEL_CAPACITY = 10;          // Initial capacity of Level 1
+const int SIZE_RATIO = 5;                       // Tiering Threshold: Merge when a level has this many runs
+const int MAX_LEVELS = 10;                      // Maximum number of levels
 const std::string SST_FILE_PREFIX = "level_";
 const std::string SST_FILE_SUFFIX = ".txt";
 
@@ -20,9 +20,8 @@ const std::string SST_FILE_SUFFIX = ".txt";
 struct key_value {
     int key;
     int value;
-    bool tombstone; // You can remove '= false' here now, constructor handles it
+    bool tombstone;
 
-    // --- Add this constructor ---
     // Use default arguments for flexibility (allows key_value(), key_value(k), key_value(k,v), etc.)
     key_value(int k = 0, int v = 0, bool t = false)
         : key(k), value(v), tombstone(t) {}
