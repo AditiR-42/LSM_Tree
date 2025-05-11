@@ -44,7 +44,6 @@ int main() {
                 case 'p': // put
                     iss >> key >> value;
                     db->insert({key, value});
-                    cout << key;
                     break;
                 case 'g': // get
                     iss >> key;
