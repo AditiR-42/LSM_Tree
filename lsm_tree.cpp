@@ -131,7 +131,6 @@ std::vector<std::pair<int, long long>> lsm_tree::rebuild_fence_pointers(const st
 struct merge_entry {
     key_value kv;
     size_t stream_index; // Which input file this entry came from
-    // Note: We don't need offset here, the ifstream handles it internally
 
     // Custom comparator for min-heap (priority queue) based on key
     bool operator>(const merge_entry& other) const {
@@ -191,19 +190,15 @@ bool level::find_key(int key, int& value, bool& is_tombstone) {
                 // std::cout << "Debug: Found relevant block starting at offset " << search_offset << " in " << filename << " using fence pointer key " << fp_it->first << std::endl;
             } else if (key < fence_pointers.front().first) {
                  // Key is smaller than the first fence pointer's key - means it should be before the first fence pointer
-                 // search_offset remains 0. (This case is covered by fp_it == fence_pointers.begin() and not going back)
-                 // std::cout << "Debug: Key smaller than first fence pointer, searching from start in " << filename << std::endl;
                  used_fence_pointer = true; // We used the knowledge from the first fence pointer
                  search_offset = 0; // Explicitly set to 0
             } else { // fp_it == fence_pointers.end()
                 // Key is greater than or equal to the last fence pointer's key. Search starts at the last fence pointer's offset.
                 search_offset = fence_pointers.back().second;
                 used_fence_pointer = true;
-                // std::cout << "Debug: Key greater than or equal to last fence pointer, searching from offset " << search_offset << " in " << filename << std::endl;
             }
         } else {
              // No fence pointers, scan the whole file from the beginning (search_offset is 0)
-             // std::cout << "Debug: No fence pointers, scanning entire file " << filename << std::endl;
              search_offset = 0;
         }
         // --- End Fence Pointer Logic ---
@@ -223,7 +218,6 @@ bool level::find_key(int key, int& value, bool& is_tombstone) {
             infile.close();
             continue; // Skip this file
         }
-
 
         std::string line;
         int current_key;
@@ -405,10 +399,7 @@ lsm_tree::lsm_tree() : next_run_id_(0) { // Initialize next_run_id_
         } else {
              std::cerr << "Warning: Could not open level directory for reading: " << level_dir << std::endl;
         }
-        // Note: We assume existing files are added to levels_[i]->sstable_runs_ in arbitrary order.
         // The find_key logic searches runs within a level newest-first (reverse iterator).
-        // If the filename structure doesn't guarantee this order, or if run ID order matters,
-        // levels_[i]->sstable_runs_ would need sorting after loading. Sorting by parsed run_id is one way.
 
         current_capacity *= SIZE_RATIO;
     }
@@ -431,10 +422,6 @@ lsm_tree::~lsm_tree() {
             SSTableInfo final_run_info = write_sstable(data_to_flush, final_sstable_file);
 
             if (!final_run_info.filename.empty()) { // write_sstable returns empty filename on failure
-                 // Add run to Level 1's list (in memory, but won't persist unless saved)
-                 // This write operation itself is the persistence step.
-                 // The in-memory list update doesn't matter much here as the object is being destroyed,
-                 // but we'll add it for consistency if cleanup_files were called after destruction.
                  if (levels_.size() > 1 && levels_[1]) {
                       levels_[1]->add_run(final_run_info);
                  }
@@ -470,8 +457,6 @@ SSTableInfo lsm_tree::write_sstable(const std::vector<key_value>& data, const st
     SSTableInfo run_info;
     run_info.filename = filename;
 
-    // Open file in text mode for writing
-    // ios::trunc ensures it's a new file or overwrites
     std::ofstream outfile(filename, std::ios::trunc);
     if (!outfile) {
         std::cerr << "Error: Could not open SSTable TXT file for writing: " << filename << std::endl;
@@ -488,8 +473,6 @@ SSTableInfo lsm_tree::write_sstable(const std::vector<key_value>& data, const st
         long long entry_start_offset = outfile.tellp();
          if (entry_start_offset == -1) {
              std::cerr << "Warning: tellp() failed before writing entry to " << filename << ". Fence pointers might be inaccurate." << std::endl;
-             // Decide how to handle - maybe continue but fence pointers will be unreliable
-             // Or return error? For now, log and continue.
          }
 
 
@@ -511,9 +494,6 @@ SSTableInfo lsm_tree::write_sstable(const std::vector<key_value>& data, const st
              line_byte_size = entry_end_offset - entry_start_offset;
         } else if (entry_end_offset == -1) {
              std::cerr << "Warning: tellp() failed after writing entry to " << filename << ". Cannot calculate line size." << std::endl;
-             // We cannot accurately track bytes if tellp fails. Fence pointers will be wrong.
-             // A robust system would fail here or switch to a different tracking method.
-             // For this exercise, we'll log and add 0, making fp generation potentially incorrect.
              line_byte_size = 0; // Cannot get accurate size
         }
 
@@ -542,14 +522,10 @@ SSTableInfo lsm_tree::write_sstable(const std::vector<key_value>& data, const st
     }
 
     // Ensure at least one fence pointer if data was written but BLOCK_SIZE was never reached
-    // The `run_info.fence_pointers.empty()` check inside the loop handles the very first entry.
-    // If data was empty, file is empty, fence_pointers is empty, which is correct.
 
     outfile.close();
     if (!outfile) { // Check close status (important!)
         std::cerr << "Error: Failed to close SSTable TXT file properly: " << filename << std::endl;
-         // File might be corrupted or incomplete even if writes seemed okay.
-         // Decide if you should delete it or leave it. Leaving might allow partial recovery.
          return {"", {}}; // Indicate failure
     }
     // std::cout << "Successfully wrote SSTable TXT: " << filename << " with " << run_info.fence_pointers.size() << " fence pointers." << std::endl;
@@ -751,11 +727,8 @@ void lsm_tree::check_and_trigger_merge(int level_num) {
 
         // Perform the merge. The result goes into the *next* level.
         int target_level_num = level_num + 1;
-        // If target_level_num exceeds MAX_LEVELS, merge_runs should return empty filename
-        // or handle writing to a specific max level location/policy.
-        // For this simple tiering, level MAX_LEVELS just accumulates.
-        if (target_level_num > MAX_LEVELS) target_level_num = MAX_LEVELS;
 
+        if (target_level_num > MAX_LEVELS) target_level_num = MAX_LEVELS;
 
         // Pass SSTableInfo vector to merge_runs
         SSTableInfo merged_run_info = merge_runs(target_level_num, runs_to_merge_info);
@@ -770,30 +743,18 @@ void lsm_tree::check_and_trigger_merge(int level_num) {
              delete_sst_files(files_to_delete); // Use the filenames collected earlier
 
              // 3. Add the new merged run (with its info) to the *next* level (if valid level)
-             // The target_level_num check is now done before calling merge_runs
              levels_[target_level_num]->add_run(merged_run_info);
 
              // 4. Recursively check if the *next* level now needs merging
-             // Check if the *next* level could potentially trigger a merge
              if (target_level_num < MAX_LEVELS) { // Only trigger if target is not the absolute max level
                  check_and_trigger_merge(target_level_num);
              } else {
                  // If merged into MAX_LEVELS, check if MAX_LEVELS needs to merge into itself
-                 // (This would be the transition from tiering to leveling in the last level,
-                 // or just managing runs within the last tiering level).
-                 // For simple tiering, it just accumulates, so no recursive call needed if > MAX_LEVELS initially.
-                 // If target_level_num == MAX_LEVELS, the merge was into the last level.
-                 // Check if THIS level (MAX_LEVELS) now has too many runs *after* adding the merged run.
                   if (levels_[MAX_LEVELS]->get_run_count() >= SIZE_RATIO && level_num < MAX_LEVELS) {
                       // This handles the cascading merge arriving at MAX_LEVELS
                        check_and_trigger_merge(MAX_LEVELS);
                   } else if (levels_[MAX_LEVELS]->get_run_count() >= SIZE_RATIO && level_num == MAX_LEVELS) {
                        // This is a merge *within* MAX_LEVELS itself if its run count exceeds SIZE_RATIO
-                       // (e.g., 5 runs become 1 run in the same level). This isn't typical tiering behavior
-                       // but could be implemented as a leveling step in the last level.
-                       // The current merge_runs puts the output in target_level_num. If target_level_num == MAX_LEVELS,
-                       // it goes back into MAX_LEVELS. This effectively compacts MAX_LEVELS.
-                       // The recursive call should therefore still check MAX_LEVELS if the merge target was MAX_LEVELS.
                        check_and_trigger_merge(MAX_LEVELS); // Recursive call for MAX_LEVELS
                   }
              }
@@ -911,8 +872,7 @@ void lsm_tree::range(int start, int end) {
 
 void lsm_tree::delete_key(int key) {
     // Insert a tombstone entry for the key.
-    // The insert logic will handle updates/memtable flushing/compaction.
-    insert({key, 0, true}); // Value doesn't matter for tombstone
+    insert({key, 0, true}); 
 }
 
 void lsm_tree::printStats() {
