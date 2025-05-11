@@ -5,7 +5,7 @@
 #include <vector>
 #include <string>
 #include <fstream>
-#include <utility> // For std::pair
+#include <utility>
 
 // --- Constants ---
 const int MEMTABLE_CAPACITY = 50;
@@ -16,9 +16,7 @@ const std::string SST_FILE_PREFIX = "run_"; // Using "run_" as in the .cpp
 const std::string SST_FILE_SUFFIX = ".txt";
 const int BLOCK_SIZE = 1024; // Define block size in bytes for fence pointers
 
-// --- Data Structures ---
-
-// Simple Key-Value struct (ensure it's POD or handle serialization carefully)
+// Simple Key-Value struct
 struct key_value {
     int key;
     int value;
@@ -41,7 +39,6 @@ struct SSTableInfo {
     std::vector<std::pair<int, long long>> fence_pointers;
 };
 
-// Forward declarations
 class level;
 class memtable;
 
@@ -77,7 +74,6 @@ public:
 };
 
 // --- Memtable Class ---
-// (No changes needed for Memtable)
 class memtable {
 public:
     std::vector<key_value> memtable_;

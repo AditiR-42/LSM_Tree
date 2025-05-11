@@ -4,21 +4,20 @@
 #include <vector>
 #include <string>
 #include <fstream>
-#include <cstdio>   // For remove
-#include <queue>    // For priority_queue
-#include <limits>   // For numeric_limits
+#include <cstdio> 
+#include <queue> 
+#include <limits> 
 #include <map>
 #include <set>
-#include <sys/stat.h> // For stat, mkdir
-#include <sys/types.h> // For stat, mkdir
-#include <unistd.h> // For rmdir (on POSIX systems)
-#include <dirent.h> // For directory listing
-#include <cerrno>   // For errno
-#include <cstring>  // For strerror
-#include <stdexcept> // For runtime_error
-#include <sstream> // For stringstream
-#include <cmath> // For std::abs (though streamoff difference is usually positive)
-
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h> 
+#include <dirent.h> 
+#include <cerrno> 
+#include <cstring>  
+#include <stdexcept> 
+#include <sstream> 
+#include <cmath> 
 
 using namespace std;
 
@@ -150,14 +149,10 @@ level::level(int capacity, int curr_level) : capacity_(capacity), curr_level_(cu
 }
 
 level::~level() {
-    // Destructor itself doesn't delete files; lsm_tree destructor or cleanup does this explicitly.
-    // We just need to ensure memory managed by level is released (like sstable_runs_ vector).
-    // The SSTableInfo structs within the vector are automatically destructed.
 }
 
 void level::add_run(const SSTableInfo& info) {
     sstable_runs_.push_back(info);
-    // In tiering, order might not strictly matter, but for lookups newest first is better.
     // The find_key logic searches runs within a level newest-first (reverse iterator).
 }
 
@@ -249,33 +244,24 @@ bool level::find_key(int key, int& value, bool& is_tombstone) {
                     infile.close(); // Found the key
                     return true;
                 }
-                // Optimization: Since the file is sorted, if we pass the key, it's not in this file
-                // We only need this check if we used fence pointers. If no fence pointers, we scan the whole file.
-                // If we used fence pointers, the target key should be >= the starting block's key.
-                // So if current_key > key, we've gone past it.
                  if (used_fence_pointer && current_key > key) {
-                     break; // Key not found in this block/file
+                     break; 
                  }
-                 // If not using fence pointers (whole file scan), we still break if key is passed
                  if (!used_fence_pointer && current_key > key) {
-                      break; // Key not found in this file
+                      break; 
                  }
 
 
             } else {
-                 // Handle parsing error on a line
                  std::cerr << "Warning: Parsing error during find_key in file: " << filename << ", line: " << line << std::endl;
-                 // Decide how to handle: skip line, or assume file corrupted and break?
-                 // Skipping seems more resilient for stats/gets.
             }
         }
 
-        // Check for read errors that didn't result in EOF or parsing failure within the loop
         if (!infile.eof() && infile.fail()) {
              std::cerr << "Warning: Read error or parsing issue near EOF in SSTable TXT file: " << filename << std::endl;
         }
 
-        infile.close(); // Close the file stream before checking the next run
+        infile.close(); 
     }
 
     return false; // Key not found in any run of this level
@@ -846,35 +832,21 @@ bool lsm_tree::insert(key_value kv_pair) {
                 check_and_trigger_merge(1);
             } else {
                 std::cerr << "Error: Failed to write flushed memtable to disk. Data potentially lost." << std::endl;
-                 // Error handling: Data from flush is lost. Attempting to re-insert the triggering pair.
-                 // If insert() fails again, something is fundamentally wrong.
-                 // We should probably not try to re-insert the *flushed* data, just the current kv_pair.
-                 // The logic here seems slightly off from typical LSM recovery on flush fail.
-                 // A simple approach for this exercise is to just fail the original insert operation.
-                 // Let's return false immediately on write_sstable failure.
-                 // The current kv_pair was NOT inserted yet, so the caller might retry it.
-                 return false; // Indicate failure to insert (due to flush failure)
+                return false; // Indicate failure to insert (due to flush failure)
             }
         } else {
-             // Memtable was full but flushed to an empty vector? Should not happen if curr_size_ > 0.
-             // If it happens, the original kv_pair still needs inserting.
-             // If flush was empty, it means curr_size_ was 0, which contradicts is_full().
-             // This branch is likely indicative of a logic error elsewhere.
-             // Let's still try inserting the original kv_pair, though it's unexpected.
-              std::cerr << "Warning: Memtable full but flush returned empty data." << std::endl;
-              if (!memtable_ptr_->insert(kv_pair)) {
-                  std::cerr << "Critical Error: Could not insert element into memtable even after anomalous flush." << std::endl;
-                   return false;
-              }
+            std::cerr << "Warning: Memtable full but flush returned empty data." << std::endl;
+            if (!memtable_ptr_->insert(kv_pair)) {
+                std::cerr << "Critical Error: Could not insert element into memtable even after anomalous flush." << std::endl;
+                return false;
+            }
         }
 
         // If flush was successful, the original kv_pair still needs to be inserted
         // because the initial memtable_ptr_->insert(kv_pair) returned false.
-        // This is a common pattern: attempt insert, if full, flush, then insert the *same* pair again.
-        // The insert after flush will definitely succeed if the memtable is now empty.
         bool insert_after_flush_ok = memtable_ptr_->insert(kv_pair);
         if (!insert_after_flush_ok) {
-             std::cerr << "Critical Error: Failed to insert element into empty memtable after successful flush." << std::endl;
+            std::cerr << "Critical Error: Failed to insert element into empty memtable after successful flush." << std::endl;
             return false; // Indicate critical failure
         }
         return true; // Insert successful after flush
