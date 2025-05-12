@@ -85,12 +85,11 @@ int main() {
              ssize_t bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
 
              if (bytes_received < 0) {
-                 // Check for non-blocking errors if socket were non-blocking (not in this example)
                  perror("recv failed");
                  goto end_client_loop; // Exit loops on error
              } else if (bytes_received == 0) {
-                 // Server closed the connection - unexpected mid-response for most commands
-                 std::cerr << "Server closed connection." << std::endl;
+                 // Server closed the connection - this might happen unexpectedly
+                 std::cerr << "Server closed connection unexpectedly." << std::endl;
                  goto end_client_loop; // Exit loops
              }
 
@@ -101,27 +100,45 @@ int main() {
              size_t newline_pos;
              while ((newline_pos = response_buffer.find('\n')) != std::string::npos) {
                  std::string line = response_buffer.substr(0, newline_pos);
-                 std::cout << line << std::endl;
                  response_buffer.erase(0, newline_pos + 1);
 
-                 // Decide if the response is finished based on the line and original command type
+                 // Decide if the response for this COMMAND TYPE is finished based on the line
                  if (command_type == 's') {
+                     std::cout << line << std::endl; // Always print stats lines
                      // Stats command has a specific multi-line output ending
                      if (line == "----------------------") {
                          response_finished = true;
                      }
+                 } else if (command_type == 'l') {
+                     // For 'l', print most lines but suppress "OK" lines (assumed from 'p' commands)
+                     if (line == "OK") {
+                         // Suppress "OK" lines received during an 'l' command.
+                         // Other lines (get/range results, errors, file open error, final OK) will be printed.
+                     } else {
+                         std::cout << line << std::endl; // Print all other lines during load
+                     }
+
+                     // Check if the response is finished based on the final lines
+                     if (line.rfind("OK: File '", 0) == 0 && line.find(" processed.") != std::string::npos) {
+                          response_finished = true;
+                     } else if (line.rfind("Error: Could not open file '", 0) == 0 && line.find(" for loading.") != std::string::npos) {
+                          response_finished = true;
+                     }
+                     // If it's neither of the ending lines, response_finished remains false, and we continue reading.
+
                  } else {
-                     // For all other commands (p, g, d, r, l, c),
-                     // the server's response (value, OK, error, range output)
-                     // is expected to be a single line ending in a newline.
-                     // Therefore, processing *any* complete line here
-                     // means the response for the current command is finished.
+                     // For all other commands (p, g, d, r, c sent directly), print the line
+                     std::cout << line << std::endl;
+                     // For these commands, the response is generally a single line (OK, value, error).
+                     // NOTE: 'r' (range) *can* output multiple lines. This current logic will
+                     // unfortunately stop after the *first* line of a range result *if sent directly*.
+                     // If you need multi-line range output when sent directly, the response_finished logic
+                     // for 'r' would need a specific terminator from the server, similar to 's'.
                      response_finished = true;
                  }
 
                  // If the response is finished based on the line just processed,
-                 // break the inner loop as well, no need to process more lines
-                 // from the current buffer chunk for this command's response.
+                 // break the inner loop as well.
                  if (response_finished) break;
 
              } // End inner while (processing lines)
@@ -131,18 +148,12 @@ int main() {
 
         } // End outer while (!response_finished)
 
-        // If the loop finished because response_finished became true, we successfully processed
-        // one command's response and are ready for the next command from stdin.
-        // If the loop finished via goto, the connection was lost.
-
         // Any data left in response_buffer here wasn't followed by a newline
-        // (i.e., a partial line). In a clean protocol, this should not happen
-        // when response_finished becomes true, unless there was an issue.
-        // We can print it as a warning or error indication.
+        // (i.e., a partial line). In a clean protocol, this shouldn't happen
+        // when response_finished becomes true based on a complete line marker.
         if (!response_buffer.empty()) {
              std::cerr << "Warning: Partial line left in buffer after response: '" << response_buffer << "'" << std::endl;
         }
-
 
     } // End while getline(std::cin...)
 
