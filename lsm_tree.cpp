@@ -904,33 +904,6 @@ bool lsm_tree::insert(key_value kv_pair) {
     return true; // Insert successful (directly into memtable)
 }
 
-void lsm_tree::load_file(const std::string& fileName) {
-    std::ifstream file;
-    string newfileName = "generated/" + fileName;
-    file.open(newfileName, ios::binary);
-    if (!file.is_open()) {
-        cerr << "Error: File " << newfileName << " not found!" << endl;
-        return;
-    }
-
-    int key;
-    int value;
-    while (file.read(reinterpret_cast<char*>(&key), sizeof(key)) &&
-           file.read(reinterpret_cast<char*>(&value), sizeof(value))) {
-        this->insert({key, value});
-    }
-
-    if (file.gcount() > 0) {
-        cerr << "Warning: Incomplete read at end of file `" << newfileName << "`.  File may be corrupted." << endl;
-    }
-    file.close();
-}
-
-// Add this function definition in lsm_tree.cpp
-void lsm_tree::load(const std::string& fileName) {
-    load_file(fileName);
-}
-
 int lsm_tree::get(int key, std::ostream& os, bool called_from_range) {
     int value = -1;
     bool is_tombstone = false;
