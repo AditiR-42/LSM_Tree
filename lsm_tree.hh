@@ -6,27 +6,24 @@
 #include <string>
 #include <fstream>
 #include <utility>
-#include <cmath> 
-#include "bloom_filter.hh" 
+#include <cmath>
+#include <ostream>
+#include <mutex>
+
+#include "bloom_filter.hh"
 
 // --- Constants ---
 const int MEMTABLE_CAPACITY = 50;
 const int INITIAL_LEVEL_CAPACITY = 10; // Capacity logic is less strict with tiering/runs
 const int SIZE_RATIO = 5; // Number of runs allowed in a level before merging
 const int MAX_LEVELS = 10;
-const std::string SST_FILE_PREFIX = "run_"; // Using "run_" as in the .cpp
+const std::string SST_FILE_PREFIX = "run_";
 const std::string SST_FILE_SUFFIX = ".txt";
 const int BLOCK_SIZE = 1024; // Define block size in bytes for fence pointers
 
 // Constants for Bloom Filter sizing within LSM Tree
-// Estimated number of elements for a flush from memtable
 const int BLOOM_FILTER_ESTIMATED_N_FLUSH = MEMTABLE_CAPACITY;
-// Estimated number of elements for a merged run (can be larger than flush)
-// A simple heuristic: assume unique keys are roughly the average of input run sizes.
-// But a safer bet is an upper bound. Sum of input sizes is an upper bound.
-// Let's use a simple multiple of MEMTABLE_CAPACITY as a guess.
-const int BLOOM_FILTER_ESTIMATED_N_MERGE = SIZE_RATIO * MEMTABLE_CAPACITY; // Or potentially larger
-
+const int BLOOM_FILTER_ESTIMATED_N_MERGE = SIZE_RATIO * MEMTABLE_CAPACITY;
 
 // Simple Key-Value struct
 struct key_value {
@@ -34,7 +31,6 @@ struct key_value {
     int value;
     bool tombstone;
 
-    // Use default arguments for flexibility (allows key_value(), key_value(k), key_value(k,v), etc.)
     key_value(int k = 0, int v = 0, bool t = false)
         : key(k), value(v), tombstone(t) {}
 
@@ -47,11 +43,9 @@ struct key_value {
 // Struct to hold SSTable filename, its fence pointers, and its Bloom Filter
 struct SSTableInfo {
     std::string filename;
-    // Fence pointers: vector of pairs (key, byte_offset)
     std::vector<std::pair<int, long long>> fence_pointers;
-    BloomFilter filter; // Add Bloom Filter member
+    BloomFilter filter;
 
-    // Constructor to initialize members
     SSTableInfo(std::string fn = "", std::vector<std::pair<int, long long>> fp = {}, BloomFilter bf = BloomFilter())
         : filename(std::move(fn)), fence_pointers(std::move(fp)), filter(std::move(bf)) {}
 
@@ -72,24 +66,19 @@ public:
     int curr_level_;
     level* next_ = nullptr; // Pointer to the next level
 
-    // Store SSTableInfo objects instead of just filenames
     std::vector<SSTableInfo> sstable_runs_;
 
     level(int capacity, int curr_level);
     ~level(); // Destructor
 
-    // Helper to get number of runs
     size_t get_run_count() const { return sstable_runs_.size(); }
 
-    // Add a new SSTable run (takes SSTableInfo which now includes filter)
     void add_run(SSTableInfo&& info); // Use move semantics
 
     // Search for a key within all runs of this level (now using Bloom filters)
     bool find_key(int key, int& value, bool& is_tombstone);
 
-    // Get list of filenames for deletion/merge
     std::vector<std::string> get_run_filenames() const;
-    // Clear all runs from this level (used after merge)
     void clear_runs();
 };
 
@@ -102,17 +91,12 @@ public:
 
     memtable();
 
-    // Insert key-value pair
-    // Returns true if successful, false otherwise (e.g., if memtable needs flushing)
     bool insert(key_value kv_pair);
 
-    // Check if memtable is full
     bool is_full() const { return curr_size_ >= capacity_; }
 
-    // Get current data (sorted) and clear memtable
     std::vector<key_value> flush();
 
-    // Find key in memtable
     bool find_key(int key, int& value, bool& is_tombstone);
 };
 
@@ -126,15 +110,14 @@ private:
     // Helper to generate unique SSTable filenames
     std::string generate_sstable_filename(int level_num);
 
-    // Helper to write sorted data to an SSTable file, returning SSTableInfo (now including filter)
+    // Helper to write sorted data to an SSTable file, returning SSTableInfo
     SSTableInfo write_sstable(const std::vector<key_value>& data, const std::string& filename, size_t estimated_n_for_filter);
 
-    // Helper function for the k-way merge, returning SSTableInfo (now including filter)
+    // Helper function for the k-way merge, returning SSTableInfo
     SSTableInfo merge_runs(int target_level_num, const std::vector<SSTableInfo>& runs_to_merge_info, size_t estimated_n_for_filter);
 
     // Helper function to rebuild fence pointers AND Bloom Filter for an existing file
     SSTableInfo rebuild_run_info(const std::string& filename);
-
 
     // Function to check and trigger merges starting from a level
     void check_and_trigger_merge(int level_num);
@@ -142,18 +125,29 @@ private:
     // Helper to delete SSTable files (takes filenames)
     void delete_sst_files(const std::vector<std::string>& filenames);
 
+    // Note: This now assumes the generator directory exists relative to the server's working directory.
+    void load_file(const std::string& fileName);
+
 
 public:
     lsm_tree();
-    ~lsm_tree(); // Important destructor to clean up levels and memtable
+    ~lsm_tree();
 
-    // Public Interface
+    // Public Interface (modified to accept ostream for output where needed)
     bool insert(key_value kv_pair);
-    int get(int key, bool called_from_range = false);
-    void range(int start, int end);
+    // get now returns int and writes to ostream if found and not tombstone
+    int get(int key, std::ostream& os, bool called_from_range = false);
+    // range now writes to ostream
+    void range(int start, int end, std::ostream& os);
     void delete_key(int key);
-    void printStats();
-    void cleanup_files(); // Explicit cleanup function
+    // printStats now writes to ostream
+    void printStats(std::ostream& os);
+
+    // Explicit cleanup function
+    void cleanup_files();
+
+    // Public wrapper for load_file to be accessible by server command handler
+    void load(const std::string& fileName);
 };
 
 #endif // LSM_TREE_HH

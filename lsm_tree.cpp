@@ -18,7 +18,8 @@
 #include <cstring>
 #include <stdexcept>
 #include <sstream>
-#include <cmath> // Needed for std::pow
+#include <cmath>
+#include <mutex> 
 
 using namespace std;
 
@@ -340,10 +341,6 @@ bool memtable::insert(key_value kv_pair) {
 std::vector<key_value> memtable::flush() {
     std::sort(memtable_.begin(), memtable_.end());
     std::vector<key_value> data_to_flush = memtable_;
-    // std::cerr << "DEBUG MEMTABLE FLUSH: Flushing " << data_to_flush.size() << " entries:" << std::endl;
-    for (const auto& kv : data_to_flush) {
-        // std::cerr << "DEBUG MEMTABLE FLUSH: - Key: " << kv.key << ", Val: " << kv.value << ", Tombstone: " << kv.tombstone << std::endl;
-    }
     memtable_.clear();
     memtable_.reserve(MEMTABLE_CAPACITY);
     curr_size_ = 0;
@@ -824,9 +821,6 @@ void lsm_tree::check_and_trigger_merge(int level_num) {
         if (target_level_num > MAX_LEVELS) target_level_num = MAX_LEVELS;
 
         // Estimate N for the merged run's filter. A simple sum of input run sizes is a safe upper bound.
-        size_t total_input_elements_estimate = 0;
-        // This would require knowing element counts per run, which we don't easily have in SSTableInfo.
-        // Falling back to a fixed constant for simplicity for now.
         size_t estimated_n_for_merge_filter = BLOOM_FILTER_ESTIMATED_N_MERGE;
 
 
@@ -910,7 +904,34 @@ bool lsm_tree::insert(key_value kv_pair) {
     return true; // Insert successful (directly into memtable)
 }
 
-int lsm_tree::get(int key, bool called_from_range) {
+void lsm_tree::load_file(const std::string& fileName) {
+    std::ifstream file;
+    string newfileName = "generated/" + fileName;
+    file.open(newfileName, ios::binary);
+    if (!file.is_open()) {
+        cerr << "Error: File " << newfileName << " not found!" << endl;
+        return;
+    }
+
+    int key;
+    int value;
+    while (file.read(reinterpret_cast<char*>(&key), sizeof(key)) &&
+           file.read(reinterpret_cast<char*>(&value), sizeof(value))) {
+        this->insert({key, value});
+    }
+
+    if (file.gcount() > 0) {
+        cerr << "Warning: Incomplete read at end of file `" << newfileName << "`.  File may be corrupted." << endl;
+    }
+    file.close();
+}
+
+// Add this function definition in lsm_tree.cpp
+void lsm_tree::load(const std::string& fileName) {
+    load_file(fileName);
+}
+
+int lsm_tree::get(int key, std::ostream& os, bool called_from_range) {
     int value = -1;
     bool is_tombstone = false;
     bool found = false;
@@ -921,7 +942,7 @@ int lsm_tree::get(int key, bool called_from_range) {
         found = true;
         // // std::cerr << "DEBUG GET: Found key " << key << " in memtable (Value: " << value << ", Tombstone: " << is_tombstone << ")" << std::endl; // Debug
         if (is_tombstone) {
-            if (!called_from_range) cout << endl;
+            if (!called_from_range) os << endl;
             return -1;
         }
     } else {
@@ -934,7 +955,7 @@ int lsm_tree::get(int key, bool called_from_range) {
                      found = true;
                      // // std::cerr << "DEBUG GET: Found key " << key << " in level " << i << " (Value: " << value << ", Tombstone: " << is_tombstone << ")" << std::endl; // Debug
                      if (is_tombstone) {
-                        if (!called_from_range) cout << endl;
+                        if (!called_from_range) os << endl;
                         return -1;
                      }
                      // Found valid entry in this level, stop searching lower levels
@@ -947,25 +968,25 @@ int lsm_tree::get(int key, bool called_from_range) {
     // Output based on findings
     if (found && !is_tombstone) {
          if (!called_from_range) {
-             cout << value << endl;
+             os << value << endl;
          } else {
-             cout << key << ":" << value << " ";
+             os << key << ":" << value << " ";
          }
          return value;
     } else {
          if (!called_from_range) {
-             cout << endl;
+             os << endl;
          }
          return -1;
     }
 }
 
-void lsm_tree::range(int start, int end) {
-    cout << "Range (" << start << " to " << end << "): ";
-    for (int k = start; k <= end; ++k) { // Inclusive range
-        get(k, true); // Call get in range mode, discard return value (it already prints)
+void lsm_tree::range(int start, int end, std::ostream& os) {
+    os << "Range (" << start << " to " << end << "): ";
+    for (int k = start; k <= end; ++k) {
+        get(k, os, true); // Call get in range mode, discard return value (it already prints)
     }
-    cout << endl;
+    os << endl;
 }
 
 void lsm_tree::delete_key(int key) {
@@ -973,8 +994,8 @@ void lsm_tree::delete_key(int key) {
     insert({key, 0, true}); 
 }
 
-void lsm_tree::printStats() {
-    std::cout << "--- LSM Tree Stats ---" << std::endl;
+void lsm_tree::printStats(std::ostream& os) {
+    os << "--- LSM Tree Stats ---" << std::endl;
 
     // Data structures to hold intermediate results
     std::map<int, std::pair<int, std::string>> logical_data; // Map<key, Pair<value, location>>
@@ -1061,14 +1082,14 @@ void lsm_tree::printStats() {
 
     // (1) Logical Pair Count
     // The size of logical_data map contains exactly the unique, non-deleted keys
-    std::cout << "Logical Pairs: " << logical_data.size() << std::endl;
+    os << "Logical Pairs: " << logical_data.size() << std::endl;
 
     // (2) Keys Per Level (Physical count including tombstones/stale data in files)
-    std::cout << "LVL1: " << physical_key_counts[1];
+    os << "LVL1: " << physical_key_counts[1];
     for (int i = 2; i <= MAX_LEVELS; ++i) {
-        std::cout << ", LVL" << i << ": " << physical_key_counts[i];
+        os << ", LVL" << i << ": " << physical_key_counts[i];
     }
-    std::cout << std::endl;
+    os << std::endl;
 
     // (3) Dump Tree (Logical view: Key:Value:Level)
     // Iterate through the sorted map (logical_data)
@@ -1087,9 +1108,9 @@ void lsm_tree::printStats() {
     // Print Memtable entries first ("M")
     if(entries_by_location.count("M")) {
          for(const auto& kv_pair : entries_by_location["M"]) {
-              std::cout << kv_pair.first << ":" << kv_pair.second << ":M ";
+              os << kv_pair.first << ":" << kv_pair.second << ":M ";
          }
-          std::cout << std::endl; // Newline after memtable entries
+          os << std::endl; // Newline after memtable entries
     }
 
 
@@ -1098,14 +1119,14 @@ void lsm_tree::printStats() {
          std::string location_str = "L" + std::to_string(level_num);
          if (entries_by_location.count(location_str)) {
              for (const auto& kv_pair : entries_by_location[location_str]) {
-                 std::cout << kv_pair.first << ":" << kv_pair.second << ":" << location_str << " ";
+                 os << kv_pair.first << ":" << kv_pair.second << ":" << location_str << " ";
              }
-             std::cout << std::endl; // Newline after each level's entries
+             os << std::endl; // Newline after each level's entries
          }
      }
 
 
-    std::cout << "----------------------" << std::endl;
+    os << "----------------------" << std::endl;
 }
 
 // Explicit function to delete all SSTable files and directories
