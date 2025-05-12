@@ -108,6 +108,7 @@ private:
     memtable* memtable_ptr_;
     std::vector<level*> levels_; // levels_[0] unused, levels_[1] is Level 1, etc.
     long long next_run_id_ = 0; // Simple way to generate unique run IDs
+    std::mutex id_mutex_; 
     mutable std::mutex cout_mutex_;
     std::mutex file_delete_mutex_;
 

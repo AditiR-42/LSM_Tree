@@ -343,6 +343,7 @@ bool memtable::insert(key_value kv_pair) {
 }
 
 std::vector<key_value> memtable::flush() {
+    std::lock_guard<std::mutex> lock(memtable_mutex_); 
     std::sort(memtable_.begin(), memtable_.end());
     std::vector<key_value> data_to_flush = memtable_;
     memtable_.clear();
@@ -507,6 +508,7 @@ lsm_tree::~lsm_tree() {
 }
 
 std::string lsm_tree::generate_sstable_filename(int level_num) {
+    std::lock_guard<std::mutex> lock(id_mutex_);
     std::string level_dir = DATA_DIR + "/L" + std::to_string(level_num);
     return level_dir + "/" + SST_FILE_PREFIX + std::to_string(next_run_id_++) + SST_FILE_SUFFIX;
 }
