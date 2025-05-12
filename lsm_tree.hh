@@ -67,6 +67,7 @@ public:
     level* next_ = nullptr; // Pointer to the next level
 
     std::vector<SSTableInfo> sstable_runs_;
+    mutable std::mutex level_mutex_;
 
     level(int capacity, int curr_level);
     ~level(); // Destructor
@@ -88,6 +89,7 @@ public:
     std::vector<key_value> memtable_;
     int capacity_ = MEMTABLE_CAPACITY;
     int curr_size_ = 0;
+    std::mutex memtable_mutex_;
 
     memtable();
 
@@ -106,6 +108,8 @@ private:
     memtable* memtable_ptr_;
     std::vector<level*> levels_; // levels_[0] unused, levels_[1] is Level 1, etc.
     long long next_run_id_ = 0; // Simple way to generate unique run IDs
+    mutable std::mutex cout_mutex_;
+    std::mutex file_delete_mutex_;
 
     // Helper to generate unique SSTable filenames
     std::string generate_sstable_filename(int level_num);

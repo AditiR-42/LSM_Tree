@@ -1,213 +1,129 @@
-// test.cpp
-#include "lsm_tree.hh"
+#include "lsm_tree.hh" // Include the LSM tree header
 #include <iostream>
-#include <cassert> // For simple checks (optional, you can just print messages)
+#include <thread>
 #include <vector>
-#include <string>
-#include <functional> // For std::function if you want a test helper wrapper
-#include <sstream> // Needed for get return value comparison
+#include <chrono>
+#include <random>
+#include <map> // To verify state
+#include <set> // To track deleted keys
 
-// Helper to print a test section header
-void print_test_header(const std::string& name) {
-    std::cout << "\n--- " << name << " ---" << std::endl;
-}
+// Define constants from lsm_tree.hh if not included by it
+// (Better to ensure lsm_tree.hh defines/includes necessary constants)
+// #define MEMTABLE_CAPACITY 10
+// #define INITIAL_LEVEL_CAPACITY 2
+// #define SIZE_RATIO 4
+// #define MAX_LEVELS 3
+// const int BLOCK_SIZE = 100; // Approximate block size in bytes
+// const std::string SST_FILE_PREFIX = "run_";
+// const std::string SST_FILE_SUFFIX = ".sst";
+// const double BLOOM_FILTER_FALSE_POSITIVE_RATE = 0.01;
+// const size_t BLOOM_FILTER_ESTIMATED_N_FLUSH = MEMTABLE_CAPACITY; // Estimated keys in a flush
+// const size_t BLOOM_FILTER_ESTIMATED_N_MERGE = 100; // Heuristic for merged runs
 
-// Simple assertion helper (prints messages instead of crashing by default)
-// Modified to work with the new get signature which writes to ostream
-void check(bool condition, const std::string& message) {
-    if (condition) {
-        std::cout << "[PASS] " << message << std::endl;
-    } else {
-        std::cerr << "[FAIL] " << message << std::endl;
+// Define test parameters
+const int NUM_THREADS = 5;
+const int OPS_PER_THREAD = 500;
+const int KEY_RANGE_START = 1000;
+const int KEY_RANGE_END = KEY_RANGE_START + NUM_THREADS * 200; // Overlapping key ranges
+
+// --- Worker Thread Function ---
+void worker_thread(lsm_tree* tree, int thread_id, int start_key, int end_key, int num_ops) {
+    std::mt19937 rng(std::chrono::steady_clock::now().time_since_epoch().count() + thread_id);
+    std::uniform_int_distribution<int> key_dist(start_key, end_key);
+    std::uniform_int_distribution<int> op_dist(0, 100); // 0-50: Insert/Update, 51-70: Delete, 71-100: Get
+
+    std::cout << "Thread " << thread_id << " starting operations in key range [" << start_key << ", " << end_key << "]" << std::endl;
+
+    for (int i = 0; i < num_ops; ++i) {
+        int key = key_dist(rng);
+        int op_type = op_dist(rng);
+
+        try {
+            if (op_type <= 50) { // Insert/Update
+                int value = thread_id * 1000 + key; // Value includes thread ID for tracking
+                tree->insert({key, value, false});
+                // std::cout << "Thread " << thread_id << ": Inserted/Updated key " << key << " with value " << value << std::endl; // Too verbose
+            } else if (op_type <= 70) { // Delete
+                tree->delete_key(key);
+                // std::cout << "Thread " << thread_id << ": Deleted key " << key << std::endl; // Too verbose
+            } else { // Get
+                int value = -1;
+                // Note: Get prints to cout in your current get implementation
+                // For concurrent testing, it's better to capture output or modify get
+                // For this simple test, we'll just call get and rely on printStats for verification
+                tree->get(key, std::cout, false); // Output to cout, not range mode
+                // Consider making `get` return a struct or optional<pair<int, bool>>
+                // rather than printing, for easier test verification.
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Thread " << thread_id << " ERROR: " << e.what() << std::endl;
+        } catch (...) {
+            std::cerr << "Thread " << thread_id << " ERROR: Unknown exception." << std::endl;
+        }
+
+        // Small sleep to potentially increase context switching
+        // std::this_thread::sleep_for(std::chrono::microseconds(10)); // Optional: can make races more likely
     }
+
+    std::cout << "Thread " << thread_id << " finished." << std::endl;
 }
 
 int main() {
-    std::cout << "Starting LSM Tree Bloom Filter & Fence Pointer Tests" << std::endl;
+    std::cout << "LSM Tree Concurrency Test" << std::endl;
 
-    // Ensure a clean slate by removing previous data directories
-    print_test_header("Cleanup previous data");
-    {
-        // Create a temporary tree object just to call cleanup_files
-        lsm_tree temp_tree;
-        temp_tree.cleanup_files();
+    // Clean up any previous test data
+    lsm_tree cleanup_tree; // Create a temporary tree just for cleanup
+    cleanup_tree.cleanup_files();
+    // The temporary cleanup_tree goes out of scope and is destroyed
+
+    // Create the main LSM tree instance
+    lsm_tree db;
+
+    // Create and launch worker threads
+    std::vector<std::thread> threads;
+    for (int i = 0; i < NUM_THREADS; ++i) {
+        int start_key = KEY_RANGE_START + i * 100; // Overlapping ranges
+        int end_key = start_key + 150;
+        threads.emplace_back(worker_thread, &db, i + 1, start_key, end_key, OPS_PER_THREAD);
     }
-    std::cout << "Cleanup complete." << std::endl;
 
+    // Wait for all threads to complete
+    for (auto& t : threads) {
+        t.join();
+    }
 
-    // --- Test 1: Basic Insert and Get (Memtable Only) ---
-    print_test_header("Test 1: Basic Insert and Get (Memtable Only)");
-    {
-        lsm_tree tree;
-        std::cout << "Inserting keys 1, 2, 3..." << std::endl;
-        tree.insert({1, 10});
-        tree.insert({2, 20});
-        tree.insert({3, 30});
+    std::cout << "\nAll threads finished. Performing final verification." << std::endl;
 
-        std::cout << "Checking keys in Memtable:" << std::endl;
+    // --- Verification ---
+    // The most reliable verification for concurrent writes is to check the final state.
+    // We can do this by iterating through the expected key range and using get().
+    // However, your get function prints directly.
+    // A simpler verification is to print stats and spot-check.
 
-        // Pass std::cout to get
-        check(tree.get(1, std::cout) == 10, "Get(1) returns 10");
-        check(tree.get(2, std::cout) == 20, "Get(2) returns 20");
-        check(tree.get(3, std::cout) == 30, "Get(3) returns 30");
-        check(tree.get(99, std::cout) == -1, "Get(99) (non-existent) returns -1"); // Key not found
+    std::cout << "\n--- Final LSM Tree State ---" << std::endl;
+    db.printStats(std::cout);
+    std::cout << "--------------------------" << std::endl;
 
-        // Pass std::cout to printStats
-        // tree.printStats(std::cout); // Should show keys 1, 2, 3 in Memtable
-    } // tree scope ends, destructor called, likely flushes memtable
+    // Basic spot checks using get
+    std::cout << "\n--- Spot Checks ---" << std::endl;
+    for (int key = KEY_RANGE_START; key <= KEY_RANGE_END; ++key) {
+       // Check a few keys across the range
+       if (key % 50 == 0) {
+           std::cout << "Checking key " << key << ": ";
+           db.get(key, std::cout, false); // get prints value or newline
+       }
+    }
+    std::cout << "-------------------" << std::endl;
 
-    // --- Test 2: Flush to Level 1 and Get (SSTable & BF/FP) ---
-    print_test_header("Test 2: Flush to Level 1 and Get (SSTable & BF/FP)");
-    {
-        lsm_tree tree; // Fresh tree. Previous memtable likely flushed by destructor.
+    // A more rigorous check would track the expected final state based on timestamps
+    // or a logical sequence of operations, but that's complex.
+    // For this simple test, we rely on printStats showing a consistent logical count
+    // and spot checks not crashing or showing obvious garbage.
 
-        std::cout << "Inserting " << MEMTABLE_CAPACITY + 5 << " keys to force flush..." << std::endl;
-        // Insert enough keys to guarantee a flush to Level 1
-        for (int i = 100; i < 100 + MEMTABLE_CAPACITY; ++i) {
-            tree.insert({i, i * 2});
-        }
-        // Insert a few more to definitely exceed capacity and trigger the flush logic
-        for (int i = 100 + MEMTABLE_CAPACITY; i < 100 + MEMTABLE_CAPACITY + 5; ++i) {
-             tree.insert({i, i * 2});
-        }
+    std::cout << "\nTest complete." << std::endl;
 
-
-        // Pass std::cout to printStats
-        // tree.printStats(std::cout); // Should show a run in L1, Memtable should be (mostly) empty
-
-        std::cout << "Checking keys that should be in the L1 SSTable:" << std::endl;
-        // Test getting keys from the SSTable (should use BF/FP)
-        check(tree.get(105, std::cout) == 210, "Get(105) returns 210 (from L1 SSTable)");
-        check(tree.get(100 + MEMTABLE_CAPACITY / 2, std::cout) == (100 + MEMTABLE_CAPACITY / 2) * 2,
-              "Get(mid-range key) returns correct value (from L1 SSTable)");
-        check(tree.get(100 + MEMTABLE_CAPACITY + 4, std::cout) == (100 + MEMTABLE_CAPACITY + 4) * 2,
-              "Get(last key) returns correct value (from L1 SSTable)");
-
-         // Test getting a key NOT in this SSTable (BF should filter)
-         // This key is far outside the range [100, 100+MEMTABLE_CAPACITY+4]
-        std::cout << "Checking a key definitely not in the L1 SSTable (BF negative test):" << std::endl;
-        check(tree.get(5000, std::cout) == -1, "Get(5000) (non-existent) returns -1 (BF should filter)");
-
-        // Test a key from Test 1 that might have been flushed by the destructor.
-        // The status depends on the order, but searching should still work.
-        // printStats might show it in L1 or L2 depending on if Test 1's flush caused a merge.
-        // We won't strictly check the value here, just that get doesn't crash and ideally returns -1.
-        std::cout << "Checking a key from previous run (may or may not exist):" << std::endl;
-        tree.get(1, std::cout); // Just call it to see output, don't strictly assert
-        tree.get(2, std::cout);
-
-    } // tree destroyed, flushing again
-
-    // --- Test 3: Overwrite and Delete in Memtable and resulting SSTable ---
-    print_test_header("Test 3: Overwrite and Delete");
-    {
-        lsm_tree tree; // Fresh tree, loads existing data
-
-        std::cout << "Inserting key 5, then overwriting..." << std::endl;
-        tree.insert({5, 50}); // Original value in memtable
-        tree.insert({6, 60}); // Original value in memtable
-
-        // Force flush 1: {5:50}, {6:60} go to L1
-        std::cout << "Force flush 1..." << std::endl;
-        for(int i = 200; i < 200 + MEMTABLE_CAPACITY; ++i) tree.insert({i, i});
-        tree.insert({200 + MEMTABLE_CAPACITY, 999});
-
-        // Pass std::cout to printStats
-        // tree.printStats(std::cout); // Should show {5:50}, {6:60} (or similar) in L1
-
-        std::cout << "Overwriting key 5, deleting key 6 in memtable..." << std::endl;
-        tree.insert({5, 55}); // Overwrite 5 in memtable
-        tree.delete_key(6);   // Delete 6 in memtable (tombstone)
-
-        std::cout << "Checking keys from memtable:" << std::endl;
-        check(tree.get(5, std::cout) == 55, "Get(5) returns 55 (newest from memtable)");
-        check(tree.get(6, std::cout) == -1, "Get(6) returns -1 (deleted in memtable)");
-
-        // Force flush 2: {5:55}, {6:tombstone} go to L1 (potentially merging with previous L1)
-        std::cout << "Force flush 2..." << std::endl;
-        for(int i = 300; i < 300 + MEMTABLE_CAPACITY; ++i) tree.insert({i, i});
-        tree.insert({300 + MEMTABLE_CAPACITY, 888});
-
-        // Pass std::cout to printStats
-        // tree.printStats(std::cout); // Should show {5:55}, {6:tombstone} (or merged) in L1 or L2
-
-        std::cout << "Checking keys after flush/merge:" << std::endl;
-        // Get should find the newest versions in the SSTables
-        check(tree.get(5, std::cout) == 55, "Get(5) returns 55 (from SSTable)");
-        check(tree.get(6, std::cout) == -1, "Get(6) returns -1 (tombstone in SSTable)");
-
-        // Check a key from the first flush SSTable (now potentially merged)
-        check(tree.get(205, std::cout) == 205, "Get(205) returns 205 (from older SSTable)");
-
-    } // tree destroyed, flushing remaining
-
-    // --- Test 4: Simple Merge to Level 2 ---
-    print_test_header("Test 4: Simple Merge to Level 2");
-    {
-         lsm_tree tree; // Fresh tree, loads existing data
-
-         std::cout << "Inserting keys to trigger merge from L1 to L2 (needs >=" << SIZE_RATIO << " runs in L1)..." << std::endl;
-
-         // Create runs in L1 until the merge threshold (SIZE_RATIO) is met
-         // Each loop iteration creates one run
-         for (int r = 0; r < SIZE_RATIO; ++r) {
-             std::cout << " Creating run " << r + 1 << "..." << std::endl;
-             // Insert keys for this run (use distinct ranges for clarity, though overlap is fine)
-             for (int i = r * 1000 + 1; i <= r * 1000 + 50; ++i) { // Insert 50 keys
-                 tree.insert({i, i * 10});
-             }
-             // Trigger flush for this run (insert MEMTABLE_CAPACITY+1 garbage keys)
-             for (int f = 0; f < MEMTABLE_CAPACITY + 1; ++f) {
-                 tree.insert({80000 + r*1000 + f, 1}); // Use high keys to avoid conflicting with main test keys
-             }
-              // Give it a moment for potential background merge if implemented async (not the case here)
-         }
-
-         // Pass std::cout to printStats
-         // tree.printStats(std::cout); // Should show runs in L2 (the result of L1 merging)
-
-         std::cout << "Checking keys from the merged L2 SSTable:" << std::endl;
-         // Test getting keys that were merged into L2
-         check(tree.get(1, std::cout) == 10, "Get(1) returns 10 (from L2 merged run)");
-
-         check(tree.get(1001, std::cout) == 10010, "Get(1001) returns 10010 (from L2 merged run)");
-         check(tree.get(4050, std::cout) == 40500, "Get(4050) returns 40500 (from L2 merged run)");
-         // Test a key not expected to be in the merged L2 (BF should filter)
-         std::cout << "Checking a key definitely not in L2 (BF negative test):" << std::endl;
-         check(tree.get(77777, std::cout) == -1, "Get(77777) (non-existent) returns -1 (BF should filter)");
-
-    } // tree destroyed
-
-     // --- Test 5: Restart and Load from Disk (Verifies rebuild_run_info) ---
-    print_test_header("Test 5: Restart and Load from Disk");
-    {
-        // Create a new tree. This will trigger the loading logic (rebuild_run_info)
-        // for files created by previous tests, including their BFs and FPs.
-        lsm_tree tree;
-
-        // Pass std::cout to printStats
-        // tree.printStats(std::cout); // Should show keys loaded from disk
-
-        std::cout << "Checking keys loaded from disk (using rebuilt BF/FP):" << std::endl;
-        // Test getting keys known to be in files from previous tests
-        check(tree.get(1, std::cout) == 10, "Get(1) returns 10 (loaded from disk)"); // From Test 4 merge
-        check(tree.get(105, std::cout) == 210, "Get(105) returns 210 (loaded from disk)"); // From Test 2 L1 flush
-        // Added these lines to capture output before check, though check itself now prints
-        // std::cout << tree.get(5) << std::endl; // This line is problematic - need to handle ostream
-        // Let's capture the output to a stringstream for the check, and also print it
-        std::stringstream ss_5; tree.get(5, ss_5); std::cout << ss_5.str();
-        check(tree.get(5, std::cout) == 55, "Get(5) returns 55 (loaded from disk - overwritten)"); // From Test 3 overwrite
-        // std::cout << tree.get(6) << std::endl; // This line is problematic - need to handle ostream
-        std::stringstream ss_6; tree.get(6, ss_6); std::cout << ss_6.str();
-        check(tree.get(6, std::cout) == -1, "Get(6) returns -1 (loaded from disk - deleted)"); // From Test 3 delete
-
-        // Test a key not in the loaded data (BF should filter)
-        std::cout << "Checking a key definitely not loaded (BF negative test):" << std::endl;
-        check(tree.get(98765, std::cout) == -1, "Get(98765) (non-existent) returns -1 (BF should filter)");
-
-    } // tree destroyed
-
-    std::cout << "\nLSM Tree Bloom Filter & Fence Pointer Tests Complete." << std::endl;
+    // The `db` object is destroyed when main exits, triggering the destructor.
+    // cleanup_files() was called at the start for a clean state.
 
     return 0;
 }

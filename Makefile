@@ -1,15 +1,15 @@
 # Makefile
 
 CC = g++
-CFLAGS = -Wall -Wextra -pedantic -std=c++11 -O3
+CFLAGS = -Wall -Wextra -pedantic -std=c++17 -O3
 
-# Server requires threading support
-SERVER_LDFLAGS = -pthread
+# Linker flags for executables that require threading
+PTHREAD_LDFLAGS = -pthread
 
 # Executable names
-SERVER_TARGET = server  
+SERVER_TARGET = server
 CLIENT_TARGET = client
-TEST_TARGET = test  
+TEST_TARGET = test
 
 # Object files
 BLOOM_FILTER_OBJECT = bloom_filter.o
@@ -20,59 +20,60 @@ TEST_OBJECT = test.o
 
 # List of object files for each executable
 SERVER_OBJECTS = $(SERVER_OBJECT) $(LSM_TREE_OBJECT) $(BLOOM_FILTER_OBJECT)
+# Assuming the client does not directly link against LSM tree or Bloom Filter
 CLIENT_OBJECTS = $(CLIENT_OBJECT)
+# Test requires LSM tree and Bloom Filter
 TEST_OBJECTS = $(TEST_OBJECT) $(LSM_TREE_OBJECT) $(BLOOM_FILTER_OBJECT)
 
 # List of ALL object files that might be created
 ALL_OBJECTS = $(SERVER_OBJECT) $(CLIENT_OBJECT) $(TEST_OBJECT) $(LSM_TREE_OBJECT) $(BLOOM_FILTER_OBJECT)
 
-# Default target builds server and client (and test if you keep it)
+# Default target builds server, client, and test
 all: $(SERVER_TARGET) $(CLIENT_TARGET) $(TEST_TARGET)
 
 # --- Linking Rules ---
 
-# Link the server application
+# Link the server application - requires threading
 $(SERVER_TARGET): $(SERVER_OBJECTS)
-	$(CC) $(CFLAGS) $(SERVER_OBJECTS) $(SERVER_LDFLAGS) -o $(SERVER_TARGET)
+	$(CC) $(CFLAGS) $(SERVER_OBJECTS) $(PTHREAD_LDFLAGS) -o $(SERVER_TARGET)
 
-# Link the client application
+# Link the client application - assuming it might need threading support too
 $(CLIENT_TARGET): $(CLIENT_OBJECTS)
-	$(CC) $(CFLAGS) $(CLIENT_OBJECTS) $(CLIENT_LDFLAGS) -o $(CLIENT_TARGET)
+	$(CC) $(CFLAGS) $(CLIENT_OBJECTS) $(PTHREAD_LDFLAGS) -o $(CLIENT_TARGET)
 
-# Link the test application
+# Link the test application - requires threading
 $(TEST_TARGET): $(TEST_OBJECTS)
-	$(CC) $(CFLAGS) $(TEST_OBJECTS) $(SERVER_LDFLAGS) -o $(TEST_TARGET) # Assuming test might use threading
+	$(CC) $(CFLAGS) $(TEST_OBJECTS) $(PTHREAD_LDFLAGS) -o $(TEST_TARGET)
 
 # --- Compilation Rules (.o files) ---
 
 # Compile lsm_tree.cpp (depends on lsm_tree.hh and bloom_filter.hh)
 $(LSM_TREE_OBJECT): lsm_tree.cpp lsm_tree.hh bloom_filter.hh
-	$(CC) $(CFLAGS) -c lsm_tree.cpp -o $(LSM_TREE_OBJECT)
+	$(CC) $(CFLAGS) -c $< -o $@
 
-# Compile main.cpp (the server logic)
-# Depends on main.cpp and the main header it includes (lsm_tree.hh)
-# Networking headers are included within main.cpp, no need to list here.
+# Compile main.cpp (the server logic) - depends on lsm_tree.hh
 $(SERVER_OBJECT): main.cpp lsm_tree.hh
-	$(CC) $(CFLAGS) -c main.cpp -o $(SERVER_OBJECT)
+	$(CC) $(CFLAGS) -c $< -o $@
 
-# Compile client.cpp (the client logic)
-# Depends only on client.cpp. It doesn't include lsm_tree.hh or bloom_filter.hh
+# Compile client.cpp (the client logic) - depends only on client.cpp
 $(CLIENT_OBJECT): client.cpp
-	$(CC) $(CFLAGS) -c client.cpp -o $(CLIENT_OBJECT)
+	$(CC) $(CFLAGS) -c $< -o $@
 
-# Compile test.cpp
+# Compile test.cpp - depends on lsm_tree.hh
 $(TEST_OBJECT): test.cpp lsm_tree.hh
-	$(CC) $(CFLAGS) -c test.cpp -o $(TEST_OBJECT)
+	$(CC) $(CFLAGS) -c $< -o $@
 
 # Compile bloom_filter.cpp
 $(BLOOM_FILTER_OBJECT): bloom_filter.cpp bloom_filter.hh
-	$(CC) $(CFLAGS) -c bloom_filter.cpp -o $(BLOOM_FILTER_OBJECT)
+	$(CC) $(CFLAGS) -c $< -o $@
 
 # --- Clean Rule ---
 
-# Clean up executables, object files, and generated SSTable files
+# Clean up executables, object files, and generated SSTable files/directories
 clean:
 	rm -f $(SERVER_TARGET) $(CLIENT_TARGET) $(TEST_TARGET) $(ALL_OBJECTS)
+	# Remove the data directory created by the LSM tree
+	-rm -rf $(DATA_DIR)
 
 # Phony targets
 .PHONY: all clean

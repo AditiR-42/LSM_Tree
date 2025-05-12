@@ -193,6 +193,7 @@ level::~level() {
 }
 
 void level::add_run(SSTableInfo&& info) {
+    std::lock_guard<std::mutex> lock(level_mutex_);
     // Add the new run (info including filename, fence pointers, and filter)
     sstable_runs_.push_back(std::move(info));
     // The find_key logic searches runs within a level newest-first (reverse iterator).
@@ -202,6 +203,7 @@ void level::add_run(SSTableInfo&& info) {
 
 // Search key in this level's SSTables (files) using Bloom filters and fence pointers
 bool level::find_key(int key, int& value, bool& is_tombstone) {
+    std::lock_guard<std::mutex> lock(level_mutex_);
     // std::cerr << "DEBUG FIND: Searching level " << curr_level_ << " runs for key " << key << std::endl; // Debug
     // Search runs in reverse order (newest first)
     for (auto it = sstable_runs_.rbegin(); it != sstable_runs_.rend(); ++it) {
@@ -301,6 +303,7 @@ bool level::find_key(int key, int& value, bool& is_tombstone) {
 }
 
 std::vector<std::string> level::get_run_filenames() const {
+    std::lock_guard<std::mutex> lock(level_mutex_);
     std::vector<std::string> filenames;
     filenames.reserve(sstable_runs_.size());
     for(const auto& info : sstable_runs_) {
@@ -321,6 +324,7 @@ memtable::memtable() {
 }
 
 bool memtable::insert(key_value kv_pair) {
+    std::lock_guard<std::mutex> lock(memtable_mutex_);
     for (int i = 0; i < curr_size_; ++i) {
         if (memtable_[i].key == kv_pair.key) {
             memtable_[i].value = kv_pair.value;
@@ -348,6 +352,7 @@ std::vector<key_value> memtable::flush() {
 }
 
 bool memtable::find_key(int key, int& value, bool& is_tombstone) {
+    std::lock_guard<std::mutex> lock(memtable_mutex_);
     for (int i = curr_size_ - 1; i >= 0; --i) {
         if (memtable_[i].key == key) {
             value = memtable_[i].value;
@@ -568,6 +573,7 @@ SSTableInfo lsm_tree::write_sstable(const std::vector<key_value>& data, const st
 }
 
 void lsm_tree::delete_sst_files(const std::vector<std::string>& filenames) {
+    std::lock_guard<std::mutex> delete_lock(file_delete_mutex_);
     // std::cerr << "DEBUG DELETE: Attempting to delete " << filenames.size() << " files:" << std::endl; // Debug
     for (const auto& filename : filenames) {
         // std::cerr << "DEBUG DELETE: - Deleting: " << filename << std::endl; // Debug
@@ -799,7 +805,7 @@ void lsm_tree::check_and_trigger_merge(int level_num) {
 
     // Check if the current level needs merging (tiering threshold reached)
     if (current_level->get_run_count() >= SIZE_RATIO) {
-        // std::cerr << "DEBUG MERGE TRIGGER: Level " << level_num << " needs merge (" << current_level->get_run_count() << "/" << SIZE_RATIO << "). Runs in memory for L" << level_num << ":" << std::endl; // Debug
+        
 
         // Prepare list of files to merge (all runs in the current level) - now SSTableInfo objects
         std::vector<SSTableInfo> runs_to_merge_info;
@@ -905,6 +911,7 @@ bool lsm_tree::insert(key_value kv_pair) {
 }
 
 int lsm_tree::get(int key, std::ostream& os, bool called_from_range) {
+    std::unique_lock<std::mutex> cout_lock(cout_mutex_, std::defer_lock);
     int value = -1;
     bool is_tombstone = false;
     bool found = false;
@@ -915,7 +922,7 @@ int lsm_tree::get(int key, std::ostream& os, bool called_from_range) {
         found = true;
         // // std::cerr << "DEBUG GET: Found key " << key << " in memtable (Value: " << value << ", Tombstone: " << is_tombstone << ")" << std::endl; // Debug
         if (is_tombstone) {
-            if (!called_from_range) os << endl;
+            if (!called_from_range) { cout_lock.lock(); os << endl; }
             return -1;
         }
     } else {
@@ -928,7 +935,7 @@ int lsm_tree::get(int key, std::ostream& os, bool called_from_range) {
                      found = true;
                      // // std::cerr << "DEBUG GET: Found key " << key << " in level " << i << " (Value: " << value << ", Tombstone: " << is_tombstone << ")" << std::endl; // Debug
                      if (is_tombstone) {
-                        if (!called_from_range) os << endl;
+                        if (!called_from_range) { cout_lock.lock(); os << endl; }
                         return -1;
                      }
                      // Found valid entry in this level, stop searching lower levels
@@ -941,6 +948,7 @@ int lsm_tree::get(int key, std::ostream& os, bool called_from_range) {
     // Output based on findings
     if (found && !is_tombstone) {
          if (!called_from_range) {
+             cout_lock.lock();
              os << value << endl;
          } else {
              os << key << ":" << value << " ";
@@ -955,6 +963,7 @@ int lsm_tree::get(int key, std::ostream& os, bool called_from_range) {
 }
 
 void lsm_tree::range(int start, int end, std::ostream& os) {
+    std::lock_guard<std::mutex> cout_lock(cout_mutex_);
     os << "Range (" << start << " to " << end << "): ";
     for (int k = start; k <= end; ++k) {
         get(k, os, true); // Call get in range mode, discard return value (it already prints)
@@ -968,6 +977,7 @@ void lsm_tree::delete_key(int key) {
 }
 
 void lsm_tree::printStats(std::ostream& os) {
+    std::lock_guard<std::mutex> cout_lock(cout_mutex_);
     os << "--- LSM Tree Stats ---" << std::endl;
 
     // Data structures to hold intermediate results
@@ -978,7 +988,7 @@ void lsm_tree::printStats(std::ostream& os) {
     // --- Stage 1: Process data from newest to oldest to find logical state ---
 
     // 1.a Process Memtable
-    // // std::cerr << "DEBUG: Processing Memtable..." << std::endl;
+    std::lock_guard<std::mutex> memtable_lock(memtable_ptr_->memtable_mutex_);
     for (int i = memtable_ptr_->curr_size_ - 1; i >= 0; --i) { // Iterate reverse for latest memtable entries first
         const auto& kv = memtable_ptr_->memtable_[i];
 
@@ -998,6 +1008,8 @@ void lsm_tree::printStats(std::ostream& os) {
     for (int level_num = 1; level_num <= MAX_LEVELS; ++level_num) {
         level* current_level = levels_[level_num];
         if (!current_level) continue; // Skip if level doesn't exist
+
+        std::lock_guard<std::mutex> level_lock(current_level->level_mutex_);
 
         // Process runs within the level (newest run first - reverse iteration of sstable_runs_)
         for (auto it = current_level->sstable_runs_.rbegin(); it != current_level->sstable_runs_.rend(); ++it) {
