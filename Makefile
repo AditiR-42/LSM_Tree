@@ -73,7 +73,7 @@ $(BLOOM_FILTER_OBJECT): bloom_filter.cpp bloom_filter.hh
 clean:
 	rm -f $(SERVER_TARGET) $(CLIENT_TARGET) $(TEST_TARGET) $(ALL_OBJECTS)
 	# Remove the data directory created by the LSM tree
-	-rm -rf $(DATA_DIR)
+	# -rm -rf $(DATA_DIR)
 
 # Phony targets
 .PHONY: all clean

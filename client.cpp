@@ -2,7 +2,8 @@
 #include <string>
 #include <vector>
 #include <cstdio>   // For perror, close
-#include <sstream>  // Needed for command parsing logic if moved to client
+#include <sstream>
+#include <fstream>
 
 // POSIX socket headers
 #include <sys/socket.h>
@@ -19,6 +20,42 @@
 // --- Client Configuration ---
 const std::string SERVER_IP = "127.0.0.1"; // Server address (localhost)
 const int SERVER_PORT = 8080;              // Server port
+
+// Helper to read exactly one newline-terminated line from the socket
+// Returns true on success, false on error or disconnect.
+bool read_line_from_socket(int sock, std::string& line) {
+    line.clear();
+    char buffer[1]; // Read one byte at a time
+    ssize_t bytes_received;
+
+    while (true) {
+        bytes_received = recv(sock, buffer, 1, 0);
+        if (bytes_received < 0) {
+            if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                perror("recv failed");
+                return false; // Fatal error
+            }
+            // If non-blocking, could yield. With blocking, shouldn't stay here.
+            continue; // Retry
+        } else if (bytes_received == 0) {
+            // Connection closed
+            if (line.empty()) {
+                // If no data was read before disconnect, it's a clean close.
+                 // std::cerr << "Connection closed by server." << std::endl; // Maybe too chatty
+            } else {
+                 // If data was read but no newline, it's a partial line at disconnect.
+                 std::cerr << "Warning: Server closed connection with partial line in buffer." << std::endl;
+            }
+            return false; // Indicate disconnect
+        }
+
+        line += buffer[0];
+        if (buffer[0] == '\n') {
+            return true; // Found newline
+        }
+    }
+}
+
 
 int main() {
     // --- Create Client Socket ---
@@ -48,111 +85,86 @@ int main() {
     }
 
     std::cout << "Connected to server " << SERVER_IP << ":" << SERVER_PORT << std::endl;
-    std::cout << "Enter commands (p key value, g key, d key, r start end, l filename, s, c):" << std::endl;
+    std::cout << "Enter commands (p key value, g key, d key, r start end, l filename [threads], s, c):" << std::endl;
 
     // --- Command Loop ---
     std::string command_line;
     while (getline(std::cin, command_line)) {
         if (command_line.empty()) {
-            std::cout << "Empty command." << std::endl;
-            continue;
+            continue; // Skip empty lines
         }
 
-        // Store the command type to anticipate response format
+        // Extract command type *before* sending
+        std::stringstream ss_cmd_type(command_line);
         char command_type = ' ';
-        if (!command_line.empty()) {
-             std::stringstream ss(command_line);
-             ss >> command_type;
-        }
+        ss_cmd_type >> command_type;
 
-
-        // Send command + newline to the server
+        // --- Send command ---
         std::string full_command = command_line + "\n";
         ssize_t sent = send(sock, full_command.c_str(), full_command.length(), 0);
         if (sent < 0) {
             perror("send failed");
-            // Assume connection lost
             goto end_client_loop; // Exit loops on error
         }
 
-        // --- Receive and print response ---
-        char buffer[1024]; // Buffer for receiving data
-        std::string response_buffer; // Buffer to accumulate potentially fragmented responses
-        bool response_finished = false; // Flag to indicate response is complete
+        // --- Receive and print response based on command type ---
+        std::string received_line;
 
-        // Loop until the response is considered finished
-        while (!response_finished) {
-             ssize_t bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
+        if (command_type == 's') {
+            // For 's' (stats), read lines until the specific terminator
+            bool stats_finished = false;
+            while (!stats_finished && read_line_from_socket(sock, received_line)) {
+                std::cout << received_line; // Print line including newline
+                if (received_line == "----------------------\n") {
+                    stats_finished = true;
+                }
+            }
+            if (!stats_finished) {
+                 // Error occurred or connection closed before terminator
+                 goto end_client_loop;
+            }
 
-             if (bytes_received < 0) {
-                 perror("recv failed");
-                 goto end_client_loop; // Exit loops on error
-             } else if (bytes_received == 0) {
-                 // Server closed the connection - this might happen unexpectedly
-                 std::cerr << "Server closed connection unexpectedly." << std::endl;
-                 goto end_client_loop; // Exit loops
+        } else if (command_type == 'l') {
+             // For 'l' (load file), read lines until a specific load terminator
+             bool load_finished = false;
+             while (!load_finished && read_line_from_socket(sock, received_line)) {
+                 // --- Suppression Logic for 'p' OKs during load ---
+                 if (received_line == "OK\n") {
+                      // Suppress "OK" responses from 'p' commands within the file
+                      // Do not print this line.
+                      // Do NOT set load_finished = true here, as other commands might follow in the file.
+                 } else {
+                      // Print all other lines (get/range results, errors, info, file open errors, final OK)
+                      std::cout << received_line;
+                 }
+                 // --- End Suppression Logic ---
+
+                 // Check for the load command terminators (success, error, info)
+                 if (received_line.rfind("OK: File '", 0) == 0 && received_line.find(" processed in ") != std::string::npos && received_line.find(" seconds.\n") != std::string::npos) {
+                      load_finished = true;
+                 } else if (received_line.rfind("Error: Could not open file '", 0) == 0 && received_line.find(" for loading.\n") != std::string::npos) {
+                      load_finished = true;
+                 } else if (received_line.rfind("Error: Invalid number of threads specified for load.\n", 0) == 0) {
+                     load_finished = true;
+                 } else if (received_line.rfind("Info: File '", 0) == 0 && received_line.find(" is empty or contains only comments.\n") != std::string::npos) {
+                      load_finished = true;
+                 }
+             }
+             if (!load_finished) {
+                  // Error occurred or connection closed before terminator
+                  goto end_client_loop;
              }
 
-             buffer[bytes_received] = '\0'; // Null-terminate received data
-             response_buffer += buffer;
-
-             // Process the buffer line by line
-             size_t newline_pos;
-             while ((newline_pos = response_buffer.find('\n')) != std::string::npos) {
-                 std::string line = response_buffer.substr(0, newline_pos);
-                 response_buffer.erase(0, newline_pos + 1);
-
-                 // Decide if the response for this COMMAND TYPE is finished based on the line
-                 if (command_type == 's') {
-                     std::cout << line << std::endl; // Always print stats lines
-                     // Stats command has a specific multi-line output ending
-                     if (line == "----------------------") {
-                         response_finished = true;
-                     }
-                 } else if (command_type == 'l') {
-                     // For 'l', print most lines but suppress "OK" lines (assumed from 'p' commands)
-                     if (line == "OK") {
-                         // Suppress "OK" lines received during an 'l' command.
-                         // Other lines (get/range results, errors, file open error, final OK) will be printed.
-                     } else {
-                         std::cout << line << std::endl; // Print all other lines during load
-                     }
-
-                     // Check if the response is finished based on the final lines
-                     if (line.rfind("OK: File '", 0) == 0 && line.find(" processed.") != std::string::npos) {
-                          response_finished = true;
-                     } else if (line.rfind("Error: Could not open file '", 0) == 0 && line.find(" for loading.") != std::string::npos) {
-                          response_finished = true;
-                     }
-                     // If it's neither of the ending lines, response_finished remains false, and we continue reading.
-
-                 } else {
-                     // For all other commands (p, g, d, r, c sent directly), print the line
-                     std::cout << line << std::endl;
-                     // For these commands, the response is generally a single line (OK, value, error).
-                     // NOTE: 'r' (range) *can* output multiple lines. This current logic will
-                     // unfortunately stop after the *first* line of a range result *if sent directly*.
-                     // If you need multi-line range output when sent directly, the response_finished logic
-                     // for 'r' would need a specific terminator from the server, similar to 's'.
-                     response_finished = true;
-                 }
-
-                 // If the response is finished based on the line just processed,
-                 // break the inner loop as well.
-                 if (response_finished) break;
-
-             } // End inner while (processing lines)
-
-             // If response_finished is true here, the outer loop condition will catch it
-             // and terminate after this iteration. If not, the outer loop continues recv'ing.
-
-        } // End outer while (!response_finished)
-
-        // Any data left in response_buffer here wasn't followed by a newline
-        // (i.e., a partial line). In a clean protocol, this shouldn't happen
-        // when response_finished becomes true based on a complete line marker.
-        if (!response_buffer.empty()) {
-             std::cerr << "Warning: Partial line left in buffer after response: '" << response_buffer << "'" << std::endl;
+        } else {
+            // For all other commands (p, g, d, r, c), read exactly one line and print it.
+            // This assumes these commands send a single line response.
+            // This is robust for p, g, d, c. For 'r', it might be okay depending on exact output format.
+            if (read_line_from_socket(sock, received_line)) {
+                std::cout << received_line; // Print line including newline
+            } else {
+                 // Error occurred or connection closed
+                 goto end_client_loop;
+            }
         }
 
     } // End while getline(std::cin...)

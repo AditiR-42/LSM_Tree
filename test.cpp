@@ -47,11 +47,10 @@ void worker_thread(lsm_tree* tree, int thread_id, int start_key, int end_key, in
                 tree->delete_key(key);
                 // std::cout << "Thread " << thread_id << ": Deleted key " << key << std::endl; // Too verbose
             } else { // Get
-                int value = -1;
                 // Note: Get prints to cout in your current get implementation
                 // For concurrent testing, it's better to capture output or modify get
                 // For this simple test, we'll just call get and rely on printStats for verification
-                tree->get(key, std::cout, false); // Output to cout, not range mode
+                tree->get(key, std::cout); // Output to cout, not range mode
                 // Consider making `get` return a struct or optional<pair<int, bool>>
                 // rather than printing, for easier test verification.
             }
@@ -110,7 +109,7 @@ int main() {
        // Check a few keys across the range
        if (key % 50 == 0) {
            std::cout << "Checking key " << key << ": ";
-           db.get(key, std::cout, false); // get prints value or newline
+           db.get(key, std::cout); // get prints value or newline
        }
     }
     std::cout << "-------------------" << std::endl;
