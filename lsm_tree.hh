@@ -77,7 +77,7 @@ public:
     void add_run(SSTableInfo&& info); // Use move semantics
 
     // Search for a key within all runs of this level (now using Bloom filters)
-    bool find_key(int key, int& value, bool& is_tombstone);
+    bool find_key(int key, int& value, bool& is_tombstone) const;
 
     std::vector<std::string> get_run_filenames() const;
     void clear_runs();
@@ -146,7 +146,7 @@ public:
     void range(int start, int end, std::ostream& os);
     void delete_key(int key);
     // printStats now writes to ostream
-    void printStats(std::ostream& os);
+    void printStats(std::ostream& os) const;
 
     // Explicit cleanup function
     void cleanup_files();

@@ -19,7 +19,7 @@
 #include <stdexcept>
 #include <sstream>
 #include <cmath>
-#include <mutex> 
+#include <mutex> // For std::mutex, std::lock_guard, std::unique_lock, std::scoped_lock
 
 using namespace std;
 
@@ -180,7 +180,6 @@ struct merge_entry {
 };
 
 
-
 // --- Level Class Implementation ---
 level::level(int capacity, int curr_level) : capacity_(capacity), curr_level_(curr_level) {
     // sstable_runs_ is already default-initialized (empty vector)
@@ -192,18 +191,19 @@ level::~level() {
     // The files themselves are NOT deleted here.
 }
 
+// Assumes caller holds level_mutex_
 void level::add_run(SSTableInfo&& info) {
-    std::lock_guard<std::mutex> lock(level_mutex_);
+    // std::lock_guard<std::mutex> lock(level_mutex_); // REMOVED internal lock
     // Add the new run (info including filename, fence pointers, and filter)
     sstable_runs_.push_back(std::move(info));
     // The find_key logic searches runs within a level newest-first (reverse iterator).
     // The LSM tree constructor ENSURES runs are added oldest-first, so rbegin() gives newest-first.
 }
 
-
+// Assumes caller holds level_mutex_
 // Search key in this level's SSTables (files) using Bloom filters and fence pointers
-bool level::find_key(int key, int& value, bool& is_tombstone) {
-    std::lock_guard<std::mutex> lock(level_mutex_);
+bool level::find_key(int key, int& value, bool& is_tombstone) const { // Changed to const
+    // std::lock_guard<std::mutex> lock(level_mutex_); // REMOVED internal lock
     // std::cerr << "DEBUG FIND: Searching level " << curr_level_ << " runs for key " << key << std::endl; // Debug
     // Search runs in reverse order (newest first)
     for (auto it = sstable_runs_.rbegin(); it != sstable_runs_.rend(); ++it) {
@@ -213,6 +213,7 @@ bool level::find_key(int key, int& value, bool& is_tombstone) {
         const auto& filter = run_info.filter;
 
         // --- Bloom Filter Check ---
+        // Bloom filter contains() is const
         if (!filter.contains(key)) {
              // std::cerr << "DEBUG FIND:   BF excluded key " << key << " from file " << filename << std::endl; // Debug
             continue; // Key definitely not in this file, skip reading it
@@ -224,6 +225,7 @@ bool level::find_key(int key, int& value, bool& is_tombstone) {
         long long search_offset = 0;
 
         if (!fence_pointers.empty()) {
+            // fence_pointers is const&, lower_bound is const
             auto fp_it = std::lower_bound(fence_pointers.begin(), fence_pointers.end(), key,
                                          [](const std::pair<int, long long>& fp, int target_key){
                                              return fp.first < target_key;
@@ -302,8 +304,9 @@ bool level::find_key(int key, int& value, bool& is_tombstone) {
     return false;
 }
 
-std::vector<std::string> level::get_run_filenames() const {
-    std::lock_guard<std::mutex> lock(level_mutex_);
+// Assumes caller holds level_mutex_
+std::vector<std::string> level::get_run_filenames() const { // Changed to const
+    // std::lock_guard<std::mutex> lock(level_mutex_); // REMOVED internal lock
     std::vector<std::string> filenames;
     filenames.reserve(sstable_runs_.size());
     for(const auto& info : sstable_runs_) {
@@ -312,13 +315,12 @@ std::vector<std::string> level::get_run_filenames() const {
     return filenames;
 }
 
+// Assumes caller holds level_mutex_
 void level::clear_runs() {
     sstable_runs_.clear(); // Clears the vector, destroying SSTableInfo objects and their filters
 }
 
-
 // --- Memtable Class Implementation ---
-// (No changes needed here)
 memtable::memtable() {
     memtable_.reserve(MEMTABLE_CAPACITY);
 }
@@ -343,7 +345,7 @@ bool memtable::insert(key_value kv_pair) {
 }
 
 std::vector<key_value> memtable::flush() {
-    std::lock_guard<std::mutex> lock(memtable_mutex_); 
+    std::lock_guard<std::mutex> lock(memtable_mutex_);
     std::sort(memtable_.begin(), memtable_.end());
     std::vector<key_value> data_to_flush = memtable_;
     memtable_.clear();
@@ -391,6 +393,7 @@ lsm_tree::lsm_tree() : next_run_id_(0) {
         }
 
         // --- Collect, Sort, and Load existing files for this level ---
+        // Loading happens single-threaded during constructor, no need for level locks here yet.
         std::vector<std::string> found_sstable_paths; // Collect paths first
 
         DIR *dirp = opendir(level_dir.c_str());
@@ -451,7 +454,7 @@ lsm_tree::lsm_tree() : next_run_id_(0) {
                       try {
                           // Extract and convert run IDs
                           long long run_id_a = std::stoll(a.substr(run_pos_a + SST_FILE_PREFIX.length(), sst_pos_a - (run_pos_a + SST_FILE_PREFIX.length())));
-                          long long run_id_b = std::stoll(b.substr(run_pos_b + SST_FILE_PREFIX.length(), sst_pos_b - (run_pos_b + SST_FILE_PREFIX.length())));
+                          long long run_id_b = std::stoll(b.substr(run_pos_b + SST_FILE_PREFIX.length(), sst_pos_b - (run_pos_b + SST_FILE_SUFFIX.length()))); // Fix substring for run_id_b
 
                           return run_id_a < run_id_b; // Sort by run ID ascending (oldest first)
                       } catch (...) {
@@ -461,6 +464,7 @@ lsm_tree::lsm_tree() : next_run_id_(0) {
                   });
 
         // Now rebuild info (including BF and FP) and add runs to the level in sorted order
+        // The add_run function will acquire the level_mutex_
         for(const auto& full_path : found_sstable_paths) {
              // Use BLOOM_FILTER_ESTIMATED_N_FLUSH as a heuristic for rebuilding
              // A more accurate rebuild might count keys, but this is simpler.
@@ -483,13 +487,15 @@ lsm_tree::lsm_tree() : next_run_id_(0) {
 lsm_tree::~lsm_tree() {
     // Perform final flush on shutdown
     if (memtable_ptr_ && memtable_ptr_->curr_size_ > 0) {
-        std::vector<key_value> data_to_flush = memtable_ptr_->flush();
+        std::vector<key_value> data_to_flush = memtable_ptr_->flush(); // flush acquires memtable lock
         if (!data_to_flush.empty()) {
-            std::string final_sstable_file = generate_sstable_filename(1);
+            std::string final_sstable_file = generate_sstable_filename(1); // acquires id_mutex_
             SSTableInfo final_run_info = write_sstable(data_to_flush, final_sstable_file, data_to_flush.size());
-            if (!final_run_info.filename.empty()) {
+            if (!final_run_info.filename.empty()) { // Check if write was successful
                  if (levels_.size() > 1 && levels_[1]) {
-                      levels_[1]->add_run(std::move(final_run_info)); // Add to L1
+                     // Need to lock L1 to add the run
+                     std::lock_guard<std::mutex> l1_lock(levels_[1]->level_mutex_);
+                      levels_[1]->add_run(std::move(final_run_info)); // add_run assumes lock held
                  }
             } else {
                  std::cerr << "Error: Failed to write final memtable flush to disk during shutdown!" << std::endl;
@@ -502,6 +508,9 @@ lsm_tree::~lsm_tree() {
     for (int i = 1; i <= MAX_LEVELS; ++i) {
         if (levels_[i]) {
              delete levels_[i]; // This deletes the level object, which destroys the sstable_runs_ vector and its SSTableInfo objects.
+             // Note: The level destructor *does not* need to acquire level_mutex_
+             // as the entire level object is being deleted, implying no other thread
+             // should be accessing it.
         }
     }
     // Physical files remain unless cleanup_files is called.
@@ -529,7 +538,7 @@ SSTableInfo lsm_tree::write_sstable(const std::vector<key_value>& data, const st
     for (size_t i = 0; i < data.size(); ++i) {
         const auto& kv = data[i];
 
-        run_info.filter.add(kv.key);
+        run_info.filter.add(kv.key); // BloomFilter add is thread-safe if underlying ops are (usually is, but depends on BF impl)
 
         long long entry_start_offset = outfile.tellp();
          if (entry_start_offset == -1) {
@@ -575,22 +584,24 @@ SSTableInfo lsm_tree::write_sstable(const std::vector<key_value>& data, const st
 }
 
 void lsm_tree::delete_sst_files(const std::vector<std::string>& filenames) {
-    std::lock_guard<std::mutex> delete_lock(file_delete_mutex_);
-    // std::cerr << "DEBUG DELETE: Attempting to delete " << filenames.size() << " files:" << std::endl; // Debug
+    std::lock_guard<std::mutex> delete_lock(file_delete_mutex_); // Acquire mutex for file deletion
+    // std::cerr << "DEBUG DELETE: Lock acquired." << std::endl; // Debug
     for (const auto& filename : filenames) {
         // std::cerr << "DEBUG DELETE: - Deleting: " << filename << std::endl; // Debug
         if (std::remove(filename.c_str()) != 0) {
-            std::cerr << "ERROR DELETE: Could not delete SSTable file: " << filename << " (" << strerror(errno) << ")" << std::endl;
+            // It's OK if the file doesn't exist (EEXIST) - another thread might have deleted it.
+            // Other errors (like permissions) should still be reported.
+            if (errno != ENOENT) { // ENOENT is "No such file or directory"
+                 std::cerr << "ERROR DELETE: Could not delete SSTable file: " << filename << " (" << strerror(errno) << ")" << std::endl;
+            } else {
+                 // std::cerr << "DEBUG DELETE: - File already deleted: " << filename << std::endl; // Debug
+            }
         } else {
              // std::cerr << "DEBUG DELETE: - Successfully deleted: " << filename << std::endl; // Debug
         }
     }
 }
 
-// --- Merge Logic ---
-// In lsm_tree.cpp, replace the existing lsm_tree::merge_runs function
-
-// In lsm_tree.cpp, replace the existing lsm_tree::merge_runs function
 
 SSTableInfo lsm_tree::merge_runs(int target_level_num, const std::vector<SSTableInfo>& runs_to_merge_info, size_t estimated_n_for_filter) {
 
@@ -599,14 +610,9 @@ SSTableInfo lsm_tree::merge_runs(int target_level_num, const std::vector<SSTable
     }
 
     // std::cerr << "DEBUG MERGE: == Starting merge into level " << target_level_num << ". Merging " << runs_to_merge_info.size() << " runs. ==" << std::endl; // Debug
-    for(size_t i=0; i < runs_to_merge_info.size(); ++i) {
-         if (i < runs_to_merge_info.size()) {
-             // std::cerr << "DEBUG MERGE:   Input run " << i << " (Oldest=" << (i==0) << ", Newest=" << (i==runs_to_merge_info.size()-1) << "): " << runs_to_merge_info[i].filename << std::endl; // Debug
-         } else {
-              // std::cerr << "DEBUG MERGE:   Input run " << i << ": Invalid/Out of bounds" << std::endl; // Debug
-         }
-    }
-
+    // for(size_t i=0; i < runs_to_merge_info.size(); ++i) {
+    //      // std::cerr << "DEBUG MERGE:   Input run " << i << ": " << runs_to_merge_info[i].filename << std::endl; // Debug
+    // }
 
     std::vector<std::ifstream> input_streams;
     input_streams.reserve(runs_to_merge_info.size());
@@ -616,12 +622,14 @@ SSTableInfo lsm_tree::merge_runs(int target_level_num, const std::vector<SSTable
     // Open all input TEXT files and read the FIRST entry from EACH
     for (size_t i = 0; i < runs_to_merge_info.size(); ++i) {
         const std::string& filename = runs_to_merge_info[i].filename;
-        input_streams.emplace_back(filename);
+        input_streams.emplace_back(filename); // Open stream
 
         if (!input_streams.back()) {
             std::cerr << "Error: Could not open TXT file for merge: " << filename << std::endl;
+            // Attempt to close already opened streams before returning
             for(auto& stream : input_streams) if(stream.is_open()) stream.close();
-            std::remove(generate_sstable_filename(target_level_num).c_str());
+             // Clean up the attempted output file if it was created
+            // std::remove(generate_sstable_filename(target_level_num).c_str()); // Don't generate filename just to remove it on failure
             return {"", {}, {}};
         }
 
@@ -640,6 +648,7 @@ SSTableInfo lsm_tree::merge_runs(int target_level_num, const std::vector<SSTable
                  }
              }
         } else {
+             // If getline failed immediately, check if it's EOF or a real error
              if (!input_streams.back().eof() && input_streams.back().fail()) {
                  std::cerr << "Warning: Failed initial read from TXT file: " << filename << std::endl;
              }
@@ -648,7 +657,8 @@ SSTableInfo lsm_tree::merge_runs(int target_level_num, const std::vector<SSTable
     // // std::cerr << "DEBUG MERGE: Initial heap size: " << min_heap.size() << std::endl; // Debug
 
 
-    std::string output_filename = generate_sstable_filename(target_level_num);
+    // Generate output filename *after* opening inputs successfully
+    std::string output_filename = generate_sstable_filename(target_level_num); // acquires id_mutex_
     std::ofstream outfile(output_filename, std::ios::trunc);
     if (!outfile) {
         std::cerr << "Error: Could not open output TXT file for merge: " << output_filename << std::endl;
@@ -673,7 +683,6 @@ SSTableInfo lsm_tree::merge_runs(int target_level_num, const std::vector<SSTable
         size_t newest_stream_idx = current_newest_for_key.stream_index;
 
 
-        // *** IMPORTANT ***
         // Discard any remaining elements at the top of the heap with the SAME KEY.
         // These MUST be older duplicates based on the comparator.
         // We need to advance their streams *before* we process the newest version,
@@ -694,13 +703,13 @@ SSTableInfo lsm_tree::merge_runs(int target_level_num, const std::vector<SSTable
         // an entry for `current_key` in this batch.
 
         // std::cerr << "DEBUG MERGE: Processing key " << current_key << ". Collected " << streams_to_advance.size() << " versions from top batch." << std::endl; // Debug
-        // std::cerr << "DEBUG MERGE:   Newest version to process: (Val: " << current_newest_for_key.kv.value << ", Tombstone: " << current_newest_for_key.kv.tombstone << ", Stream: " << current_newest_for_key.stream_index << ")" << std::endl; // Debug
+        // std::cerr << "DEBUG MERGE:   Newest version to process: (Val: " << current_newest_for_key.kv.value << ", Tombstone: " << current_newest_for_key.kv.tombstone << ", Stream: " << runs_to_merge_info[current_newest_for_key.stream_index].filename << ")" << std::endl; // Debug
 
 
         // --- Process the newest version: Write if not tombstone. ---
         // This is the ONLY point where we write for `current_key`.
         if (!current_newest_for_key.kv.tombstone) {
-             merged_run_info.filter.add(current_newest_for_key.kv.key);
+             merged_run_info.filter.add(current_newest_for_key.kv.key); // BloomFilter add is thread-safe internally
 
              long long entry_start_offset = outfile.tellp();
               if (entry_start_offset == -1) { std::cerr << "Warning: tellp() failed before writing entry to merged file " << output_filename << ". Fence pointers might be inaccurate." << std::endl; }
@@ -736,7 +745,7 @@ SSTableInfo lsm_tree::merge_runs(int target_level_num, const std::vector<SSTable
         // Now, read the next entry from EACH stream that contributed a version of `current_key`
         // in this batch and push it onto the heap.
         for (size_t stream_idx : streams_to_advance) {
-             // std::cerr << "DEBUG MERGE:   Advancing stream " << stream_idx << " for key " << current_key << std::endl; // Debug
+             // std::cerr << "DEBUG MERGE:   Advancing stream " << stream_idx << " for key " << current_key << " (file: " << runs_to_merge_info[stream_idx].filename << ")" << std::endl; // Debug
 
             if (input_streams[stream_idx].is_open()) {
                  std::string next_line;
@@ -774,6 +783,7 @@ SSTableInfo lsm_tree::merge_runs(int target_level_num, const std::vector<SSTable
     outfile.close();
     if (!outfile) {
         std::cerr << "Error closing merged output TXT file properly: " << output_filename << std::endl;
+         // If closing fails, the file might be incomplete or corrupted. Delete it.
          std::remove(output_filename.c_str());
          return {"", {}, {}};
     }
@@ -781,15 +791,8 @@ SSTableInfo lsm_tree::merge_runs(int target_level_num, const std::vector<SSTable
     // Close any remaining input streams (should all be closed by now if successful)
     for (auto& stream : input_streams) {
         if (stream.is_open()) {
-             std::cerr << "Warning: Input stream was still open after merge loop." << std::endl;
-             size_t stream_idx = &stream - &input_streams[0]; // Get index of stream
-             if (stream_idx < runs_to_merge_info.size()) {
-                  std::cerr << " for file: " << runs_to_merge_info[stream_idx].filename << std::endl;
-             } else {
-                  std::cerr << std::endl;
-             }
-
-            stream.close();
+             std::cerr << "Warning: Input stream was still open after merge loop. Closing." << std::endl;
+             stream.close();
         }
     }
 
@@ -799,132 +802,211 @@ SSTableInfo lsm_tree::merge_runs(int target_level_num, const std::vector<SSTable
 
 // Function to check and trigger merges starting from a level
 void lsm_tree::check_and_trigger_merge(int level_num) {
+    // Merge can be triggered from L1 up to L_MAX.
+    // A merge from level_num produces a run for level_num + 1.
+    // The new run is placed in target_level, capped at MAX_LEVELS.
     if (level_num < 1 || level_num > MAX_LEVELS) {
-        return; // Invalid level
+        // Invalid source level for merge.
+        // std::cerr << "DEBUG MERGE TRIGGER: Invalid source level " << level_num << ". Returning." << std::endl; // Debug
+        return;
     }
 
     level* current_level = levels_[level_num];
+    int target_level_num = level_num + 1;
+    level* target_level = nullptr;
 
-    // Check if the current level needs merging (tiering threshold reached)
-    if (current_level->get_run_count() >= SIZE_RATIO) {
-        
-
-        // Prepare list of files to merge (all runs in the current level) - now SSTableInfo objects
-        std::vector<SSTableInfo> runs_to_merge_info;
-        std::vector<std::string> files_to_delete = current_level->get_run_filenames(); // Get filenames *before* clearing
-
-        // Populate runs_to_merge_info by copying from current_level->sstable_runs_
-        // This maintains the original order (oldest to newest)
-        runs_to_merge_info.reserve(current_level->sstable_runs_.size());
-        for(const auto& info : current_level->sstable_runs_) {
-            runs_to_merge_info.push_back(info); // Copies SSTableInfo
-            // std::cerr << "DEBUG MERGE TRIGGER:   - RunInfo filename: " << info.filename << std::endl; // Debug
-        }
-
-        // std::vector<std::string> files_to_delete = current_level->get_run_filenames(); // Get filenames for deletion
-
-        // Perform the merge. The result goes into the *next* level.
-        int target_level_num = level_num + 1;
-
-        if (target_level_num > MAX_LEVELS) target_level_num = MAX_LEVELS;
-
-        // Estimate N for the merged run's filter. A simple sum of input run sizes is a safe upper bound.
-        size_t estimated_n_for_merge_filter = BLOOM_FILTER_ESTIMATED_N_MERGE;
-
-
-        // Pass SSTableInfo vector to merge_runs
-        SSTableInfo merged_run_info = merge_runs(target_level_num, runs_to_merge_info, estimated_n_for_merge_filter);
-
-        if (!merged_run_info.filename.empty()) {
-             // Merge successful
-
-             // 1. Clear the runs from the current level (they are now merged)
-             current_level->clear_runs(); // Use the clear_runs method (destroys old SSTableInfo and filters)
-
-             // 2. Delete the physical files that were merged
-             delete_sst_files(files_to_delete); // Use the filenames collected earlier
-
-             // 3. Add the new merged run (with its info and filter) to the *next* level
-             levels_[target_level_num]->add_run(std::move(merged_run_info)); // Use move semantics
-
-             // 4. Recursively check if the *next* level now needs merging
-             if (target_level_num <= MAX_LEVELS) { // Trigger if target is a valid level number
-                  check_and_trigger_merge(target_level_num);
-             }
-             // If target_level_num == MAX_LEVELS + 1, it won't recurse further.
-
-        } else {
-            std::cerr << "Error: Merge failed for level " << level_num << ". Files remain and level state is inconsistent." << std::endl;
-            // This is a critical error state. Files are not deleted, level is not cleared.
-            // Recovery or specific error handling might be needed.
-        }
+    // Determine the actual target level pointer, capped at MAX_LEVELS
+    if (target_level_num <= MAX_LEVELS) {
+        target_level = levels_[target_level_num];
+    } else {
+        // If merging from MAX_LEVELS, the target is still MAX_LEVELS (compaction strategy varies)
+        // In this simple model, data effectively "overflows" from MAX_LEVELS by merging into L_MAX.
+        target_level_num = MAX_LEVELS;
+        target_level = levels_[MAX_LEVELS]; // This handles L_MAX merging into L_MAX
     }
+
+    // Defensive check: Ensure we have a valid target level pointer
+    if (!target_level) {
+        std::cerr << "Critical Error: Target level " << target_level_num << " for merge from L" << level_num << " is unexpectedly null. Cannot merge." << std::endl;
+        return;
+    }
+
+
+    // --- Phase 1: Determine merge needs, identify files, clear source level ---
+    // Acquire lock for the *source* level to read its runs and clear it.
+    // This lock must be held while reading sstable_runs_ and calling clear_runs.
+    std::vector<SSTableInfo> runs_to_merge_info;
+    std::vector<std::string> files_to_delete;
+
+    { // Scoped lock for the current (source) level
+        std::lock_guard<std::mutex> current_level_lock(current_level->level_mutex_);
+
+        // Check merge condition *while holding the lock*
+        if (current_level->sstable_runs_.size() < SIZE_RATIO) {
+             // std::cerr << "DEBUG MERGE TRIGGER: Level " << level_num << " doesn't need merge (" << current_level->sstable_runs_.size() << "/" << SIZE_RATIO << "). Returning." << std::endl; // Debug
+            return; // Locks automatically released when lock_guard goes out of scope
+        }
+        // std::cerr << "DEBUG MERGE TRIGGER: Level " << level_num << " needs merge (" << current_level->sstable_runs_.size() << "/" << SIZE_RATIO << "). Runs in memory for L" << level_num << ":" << std::endl; // Debug
+
+        // Copy runs to merge info and filenames while holding the lock
+        runs_to_merge_info.reserve(current_level->sstable_runs_.size());
+        files_to_delete.reserve(current_level->sstable_runs_.size());
+        for(const auto& info : current_level->sstable_runs_) {
+            runs_to_merge_info.push_back(info); // Copies SSTableInfo (incl. filename, fp, filter)
+            files_to_delete.push_back(info.filename); // Copies filename for deletion
+        }
+         // std::cerr << "DEBUG MERGE TRIGGER: Files collected for merge/delete: " << files_to_delete.size() << " from L" << level_num << "." << std::endl; // Debug
+
+        // Clear the runs from the current level *now* while the lock is held.
+        current_level->clear_runs(); // Assumes clear_runs does not re-lock
+         // std::cerr << "DEBUG MERGE TRIGGER: Level " << level_num << " runs cleared from memory." << std::endl; // Debug
+
+    } // current_level_lock goes out of scope and releases the mutex
+
+    // --- Phase 2: Perform the merge (File I/O) ---
+    // This phase is computationally intensive and involves file reading/writing.
+    // It happens *without* holding level locks.
+    // The merge_runs function itself does not need level locks as it operates on file handles.
+    // std::cerr << "DEBUG MERGE TRIGGER: Performing merge for L" << level_num << " into L" << target_level_num << "." << std::endl; // Debug
+
+    SSTableInfo merged_run_info = merge_runs(target_level_num, runs_to_merge_info, BLOOM_FILTER_ESTIMATED_N_MERGE); // Pass SSTableInfo vector
+
+    // --- Phase 3: Add the new merged run to the target level ---
+    // Acquire lock for the *target* level to add the new run.
+    // This lock must be held while adding the merged_run_info.
+    if (!merged_run_info.filename.empty()) {
+         // Merge output file was successfully created
+         // std::cerr << "DEBUG MERGE TRIGGER: Merge output file created: " << merged_run_info.filename << "." << std::endl; // Debug
+
+         { // Scoped lock for the target level
+              std::lock_guard<std::mutex> target_level_lock(target_level->level_mutex_);
+               // std::cerr << "DEBUG MERGE TRIGGER: Adding merged run to L" << target_level_num << "." << std::endl; // Debug
+              levels_[target_level_num]->add_run(std::move(merged_run_info)); // Assumes add_run does not re-lock
+         } // target_level_lock goes out of scope and releases the mutex
+
+         // --- Phase 4: Recursively check if the *next* level now needs merging ---
+         // This check happens *after* the current merge is complete and the new run is added.
+         // It might trigger another merge *from* the target level.
+         // Only recurse if the target level number is within the valid range to *start* a merge from.
+         if (target_level_num <= MAX_LEVELS) { // Valid source level for the next potential merge
+              // std::cerr << "DEBUG MERGE TRIGGER: Checking if L" << target_level_num << " now needs a merge." << std::endl; // Debug
+              check_and_trigger_merge(target_level_num);
+         } else {
+             // std::cerr << "DEBUG MERGE TRIGGER: Target level " << target_level_num << " is beyond MAX_LEVELS. Stopping recursion." << std::endl; // Debug
+         }
+
+    } else {
+         // Merge failed (output file not created)
+         // std::cerr << "DEBUG MERGE TRIGGER: Merge failed for level " << level_num << ". State potentially inconsistent." << std::endl; // Debug
+        std::cerr << "Error: Merge failed for level " << level_num << ". Output file not created. Files from L" << level_num << " were cleared from memory but NOT deleted from disk. Manual cleanup may be required." << std::endl;
+        // Note: In a real system, you'd need robust recovery or rollback here.
+    }
+
+    // --- Phase 5: Delete old files ---
+    // This happens *after* the merge completes (or fails) and target level state is updated.
+    // It uses the dedicated file_delete_mutex_ internally to serialize file removals.
+     // std::cerr << "DEBUG MERGE TRIGGER: Initiating file deletion for runs merged from L" << level_num << "." << std::endl; // Debug
+    delete_sst_files(files_to_delete); // delete_sst_files handles its own locking
+
+     // std::cerr << "DEBUG MERGE TRIGGER: Finished merge process for L" << level_num << "." << std::endl; // Debug
 }
 
 // --- Public Interface Implementation ---
 
 bool lsm_tree::insert(key_value kv_pair) {
     // Try inserting into memtable
-    if (!memtable_ptr_->insert(kv_pair)) {
+    if (!memtable_ptr_->insert(kv_pair)) { // insert acquires memtable_mutex_
         // Memtable is full, need to flush it
 
-        // cout << "Memtable full. Flushing to Level 1..." << endl;
+        // std::cout << "Memtable full. Flushing to Level 1..." << std::endl; // Debug output
+
+        // Flush the memtable (acquires memtable_mutex_)
         std::vector<key_value> data_to_flush = memtable_ptr_->flush();
 
         if (!data_to_flush.empty()) {
-            // Generate a filename for the new run in Level 1
+            // Generate a filename for the new run in Level 1 (acquires id_mutex_)
             std::string new_sstable_file = generate_sstable_filename(1);
 
             // Write the flushed data to the new SSTable file and get its info (including filter)
+            // This is file I/O, doesn't need LSM tree/level locks.
             // Use the actual size of data being flushed as the estimated N for the filter
             SSTableInfo new_run_info = write_sstable(data_to_flush, new_sstable_file, data_to_flush.size());
 
             if (!new_run_info.filename.empty()) { // Check if write was successful
-                // Add the new run (info) to Level 1 (using move semantics)
-                levels_[1]->add_run(std::move(new_run_info));
+                // Add the new run (info) to Level 1
+                // Need to lock Level 1 to modify its sstable_runs_ vector.
+                if (levels_.size() > 1 && levels_[1]) { // Defensive check
+                     // std::cerr << "DEBUG INSERT: Adding new run " << new_run_info.filename << " to L1." << std::endl; // Debug
+                    std::lock_guard<std::mutex> l1_lock(levels_[1]->level_mutex_);
+                    levels_[1]->add_run(std::move(new_run_info)); // add_run assumes lock held
+                } else {
+                    std::cerr << "Critical Error: Level 1 is null or levels_ vector too small. Cannot add flushed run." << std::endl;
+                     // The run info and file exist, but are not tracked. Data loss.
+                     // In a real system, this would require significant error handling/recovery.
+                }
+
 
                 // Check if Level 1 needs merging now
+                 // This call will acquire its own locks internally.
+                 // It should be called *after* the flushed run has been successfully added to L1.
                 check_and_trigger_merge(1);
+
             } else {
                 std::cerr << "Error: Failed to write flushed memtable to disk. Data potentially lost." << std::endl;
                 return false; // Indicate failure to insert (due to flush failure)
             }
-        } else {
-            // std::cerr << "Warning: Memtable full but flush returned empty data." << std::endl;
-            // If flush returned empty data (shouldn't happen if memtable was full),
-            // the original insert failed due to fullness. We should retry inserting.
-            // The below check is probably redundant if flush works correctly, but safe.
-            if (!memtable_ptr_->insert(kv_pair)) {
-                std::cerr << "Critical Error: Could not insert element into memtable even after anomalous flush." << std::endl;
-                return false; // Indicate critical failure
-            }
-        }
+         } else {
+             // This case should ideally not happen if memtable was full but flush yielded empty data.
+             // It means memtable_ptr_->flush() returned an empty vector unexpectedly.
+             std::cerr << "Warning: Memtable was full, but flush returned empty data. This indicates an anomaly." << std::endl;
+             // The original insert failed due to fullness. We should retry inserting now that memtable is supposedly clear.
+             bool insert_after_anomalous_flush = memtable_ptr_->insert(kv_pair); // insert acquires memtable_mutex_
+             if (!insert_after_anomalous_flush) {
+                 std::cerr << "Critical Error: Could not insert element into memtable even after anomalous flush attempt." << std::endl;
+                 return false; // Indicate critical failure
+             }
+             return true; // Insert successful after anomalous flush attempt
+         }
 
-        // If flush was successful, the original kv_pair still needs to be inserted
-        // because the initial memtable_ptr_->insert(kv_pair) returned false.
-        bool insert_after_flush_ok = memtable_ptr_->insert(kv_pair);
+
+        // If flush was successful (data_to_flush was not empty), the original kv_pair still needs to be inserted.
+        // The initial memtable_ptr_->insert(kv_pair) returned false because it was full.
+        // Memtable is now empty (or has space after the anomalous flush case above).
+        // The insert below acquires memtable_mutex_ again.
+        bool insert_after_flush_ok = memtable_ptr_->insert(kv_pair); // insert acquires memtable_mutex_
         if (!insert_after_flush_ok) {
+            // This should be unreachable if flush cleared the memtable correctly.
             std::cerr << "Critical Error: Failed to insert element into empty memtable after successful flush." << std::endl;
             return false; // Indicate critical failure
         }
-        return true; // Insert successful after flush
+        return true; // Insert successful after flush and re-insert
     }
-    return true; // Insert successful (directly into memtable)
+    // Insert successful (directly into memtable, first attempt)
+    return true;
 }
 
+// Note: get accesses multiple potentially shared structures (memtable, levels).
+// It relies on find_key in memtable and level to handle their own locks.
+// Output to os is protected by cout_mutex_.
 int lsm_tree::get(int key, std::ostream& os, bool called_from_range) {
+    // Acquire lock for output stream only when printing will occur
+    // Defer locking so it's only locked right before actual output.
     std::unique_lock<std::mutex> cout_lock(cout_mutex_, std::defer_lock);
+
     int value = -1;
     bool is_tombstone = false;
     bool found = false;
 
     // 1. Check Memtable
     // // std::cerr << "DEBUG GET: Searching memtable for key " << key << std::endl; // Debug
-    if (memtable_ptr_->find_key(key, value, is_tombstone)) {
+    if (memtable_ptr_->find_key(key, value, is_tombstone)) { // find_key acquires memtable_mutex_
         found = true;
         // // std::cerr << "DEBUG GET: Found key " << key << " in memtable (Value: " << value << ", Tombstone: " << is_tombstone << ")" << std::endl; // Debug
         if (is_tombstone) {
-            if (!called_from_range) { cout_lock.lock(); os << endl; }
+            if (!called_from_range) {
+                cout_lock.lock(); // Lock before printing
+                os << endl;
+            }
             return -1;
         }
     } else {
@@ -933,56 +1015,79 @@ int lsm_tree::get(int key, std::ostream& os, bool called_from_range) {
         for (int i = 1; i <= MAX_LEVELS; ++i) {
             if (levels_[i]) {
                 // // std::cerr << "DEBUG GET: Searching level " << i << " for key " << key << std::endl; // Debug
-                if (levels_[i]->find_key(key, value, is_tombstone)) {
+                // Need to lock the level *before* calling find_key on it
+                std::lock_guard<std::mutex> level_lock(levels_[i]->level_mutex_); // Acquired lock
+                if (levels_[i]->find_key(key, value, is_tombstone)) { // find_key assumes caller holds lock
                      found = true;
                      // // std::cerr << "DEBUG GET: Found key " << key << " in level " << i << " (Value: " << value << ", Tombstone: " << is_tombstone << ")" << std::endl; // Debug
                      if (is_tombstone) {
-                        if (!called_from_range) { cout_lock.lock(); os << endl; }
+                        if (!called_from_range) {
+                            cout_lock.lock(); // Lock before printing
+                            os << endl;
+                        }
                         return -1;
                      }
                      // Found valid entry in this level, stop searching lower levels
-                     break;
+                     break; // Release level_lock due to break
                 }
-            }
+            } // level_lock goes out of scope here if break is not hit
         }
     }
 
     // Output based on findings
     if (found && !is_tombstone) {
          if (!called_from_range) {
-             cout_lock.lock();
+             cout_lock.lock(); // Lock before printing
              os << value << endl;
          } else {
+             // If called from range, the caller (range) is responsible for cout_mutex_
+             // We print directly here assuming the caller holds the lock.
              os << key << ":" << value << " ";
          }
          return value;
     } else {
+         // Not found or found and is tombstone
          if (!called_from_range) {
+             cout_lock.lock(); // Lock before printing
              os << endl;
+         } else {
+             // If called from range, print nothing for not found/tombstone, caller handles spacing/newline.
+             // Your previous code printed nothing, which is fine for range output format.
+             // std::cerr << "DEBUG GET: Key " << key << " not found or is tombstone, skipping range output." << std::endl; // Debug
          }
          return -1;
     }
 }
 
+// Note: range calls get repeatedly and prints header/footer.
+// It acquires cout_mutex_ for the entire operation.
 void lsm_tree::range(int start, int end, std::ostream& os) {
-    std::lock_guard<std::mutex> cout_lock(cout_mutex_);
+    std::lock_guard<std::mutex> cout_lock(cout_mutex_); // Lock for the entire range output
     os << "Range (" << start << " to " << end << "): ";
     for (int k = start; k <= end; ++k) {
-        get(k, os, true); // Call get in range mode, discard return value (it already prints)
+        // Call get in range mode. get will *not* acquire cout_mutex_ if called_from_range is true.
+        // This function (range) holds the lock for get's printing.
+        get(k, os, true);
     }
     os << endl;
 }
 
 void lsm_tree::delete_key(int key) {
     // Insert a tombstone entry for the key.
-    insert({key, 0, true}); 
+    // This relies on the insert function's locking.
+    insert({key, 0, true});
 }
 
-void lsm_tree::printStats(std::ostream& os) {
-    std::lock_guard<std::mutex> cout_lock(cout_mutex_);
+// Note: printStats reads state across memtable and levels.
+// It locks memtable_mutex_ and each level_mutex_ sequentially.
+// Output to os is protected by cout_mutex_.
+void lsm_tree::printStats(std::ostream& os) const { // Added const
+    std::lock_guard<std::mutex> cout_lock(cout_mutex_); // Lock for the entire stats output
     os << "--- LSM Tree Stats ---" << std::endl;
 
     // Data structures to hold intermediate results
+    // NOTE: Gathering stats across multiple levels atomically (a consistent snapshot)
+    // requires more complex locking than simple mutexes. This implementation locks each part (memtable, then each level's run list) sequentially, meaning the state *could* change between reading different levels.
     std::map<int, std::pair<int, std::string>> logical_data; // Map<key, Pair<value, location>>
     std::set<int> deleted_keys;                             // Keep track of keys confirmed deleted
     std::vector<long long> physical_key_counts(MAX_LEVELS + 1, 0); // Count all keys per level file
@@ -990,6 +1095,7 @@ void lsm_tree::printStats(std::ostream& os) {
     // --- Stage 1: Process data from newest to oldest to find logical state ---
 
     // 1.a Process Memtable
+    // Lock the memtable while processing it
     std::lock_guard<std::mutex> memtable_lock(memtable_ptr_->memtable_mutex_);
     for (int i = memtable_ptr_->curr_size_ - 1; i >= 0; --i) { // Iterate reverse for latest memtable entries first
         const auto& kv = memtable_ptr_->memtable_[i];
@@ -1011,7 +1117,8 @@ void lsm_tree::printStats(std::ostream& os) {
         level* current_level = levels_[level_num];
         if (!current_level) continue; // Skip if level doesn't exist
 
-        std::lock_guard<std::mutex> level_lock(current_level->level_mutex_);
+        // Lock the level while iterating its run list (sstable_runs_)
+        std::lock_guard<std::mutex> level_lock(current_level->level_mutex_); // Safe, mutable mutex
 
         // Process runs within the level (newest run first - reverse iteration of sstable_runs_)
         for (auto it = current_level->sstable_runs_.rbegin(); it != current_level->sstable_runs_.rend(); ++it) {
@@ -1100,7 +1207,6 @@ void lsm_tree::printStats(std::ostream& os) {
           os << std::endl; // Newline after memtable entries
     }
 
-
     // Print Level entries ("L1" to "LMAX_LEVELS") in order
      for (int level_num = 1; level_num <= MAX_LEVELS; ++level_num) {
          std::string location_str = "L" + std::to_string(level_num);
@@ -1112,25 +1218,31 @@ void lsm_tree::printStats(std::ostream& os) {
          }
      }
 
-
     os << "----------------------" << std::endl;
 }
 
 // Explicit function to delete all SSTable files and directories
+// Note: Called during initialization and shutdown, should be thread-safe with other ops.
 void lsm_tree::cleanup_files() {
     std::cout << "Cleaning up ALL SSTable files and directories..." << std::endl;
+    // Need to lock levels to get filenames and clear runs.
+    // File deletion is handled by delete_sst_files's internal lock.
     for (int i = 1; i <= MAX_LEVELS; ++i) {
         if (levels_[i]) {
-            // Get filenames from SSTableInfo objects
-            std::vector<std::string> files_to_delete = levels_[i]->get_run_filenames();
+            std::vector<std::string> files_to_delete;
+            { // Scoped lock for this level
+                std::lock_guard<std::mutex> level_lock(levels_[i]->level_mutex_); // Safe, mutable mutex
+                // Get filenames from SSTableInfo objects while holding the lock
+                files_to_delete = levels_[i]->get_run_filenames(); // get_run_filenames assumes lock held
 
-            // Delete files stored in memory
-            delete_sst_files(files_to_delete);
+                // Clear the list of SSTableInfo objects in memory while holding the lock
+                levels_[i]->clear_runs(); // clear_runs assumes lock held
+            } // level_lock goes out of scope, releases mutex
 
-            // Clear the list of SSTableInfo objects in memory
-            levels_[i]->clear_runs(); // Use the clear_runs method
+            // Delete the physical files after releasing the level lock
+            delete_sst_files(files_to_delete); // delete_sst_files uses file_delete_mutex_ internally
 
-            // Optionally remove the directory itself
+            // Optionally remove the directory itself (this might fail if not empty)
             std::string level_dir = DATA_DIR + "/L" + std::to_string(i);
              if (rmdir(level_dir.c_str()) != 0) {
                  if (errno != ENOTEMPTY) {
@@ -1143,7 +1255,7 @@ void lsm_tree::cleanup_files() {
              }
         }
     }
-    // Optionally remove the root data directory
+    // Optionally remove the root data directory (this might fail if not empty)
     if (rmdir(DATA_DIR.c_str()) != 0) {
          if (errno != ENOTEMPTY) {
              std::cerr << "Warning: Could not remove root data directory " << DATA_DIR << ": " << strerror(errno) << std::endl;
@@ -1155,5 +1267,6 @@ void lsm_tree::cleanup_files() {
     }
 
      // Reset run ID generator
+     std::lock_guard<std::mutex> id_lock(id_mutex_);
      next_run_id_ = 0;
 }
