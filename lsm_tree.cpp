@@ -347,7 +347,7 @@ void memtable::insert(key_value kv_pair, bool& trigger_flush) {
     std::lock_guard<std::mutex> lock(memtable_mutex_);
     bool is_update = memtable_.count(kv_pair.key) > 0;
 
-    // Insert or update the key. Map handles existing keys by replacement.
+    // Insert or update the key
     memtable_[kv_pair.key] = kv_pair;
 
     // If it was a new key, increment size
@@ -364,7 +364,7 @@ std::vector<key_value> memtable::flush() {
     std::vector<key_value> data_to_flush;
     data_to_flush.reserve(memtable_.size()); // Reserve space based on map size
     for(const auto& pair : memtable_) {
-        data_to_flush.push_back(pair.second); // Map stores pair<key, value>
+        data_to_flush.push_back(pair.second);
     }
 
     // Clear the map
@@ -374,38 +374,35 @@ std::vector<key_value> memtable::flush() {
 }
 
 bool memtable::find_key(int key, int& value, bool& is_tombstone) {
-std::lock_guard<std::mutex> lock(memtable_mutex_);
-// Use map::find to locate the key
-auto it = memtable_.find(key);
+    std::lock_guard<std::mutex> lock(memtable_mutex_);
+    auto it = memtable_.find(key);
 
-if (it != memtable_.end()) {
-    // Key found in map
-    const key_value& kv = it->second; // Map iterator points to pair<key, value>
-    value = kv.value;
-    is_tombstone = kv.tombstone;
-    return true;
-}
+    if (it != memtable_.end()) {
+        const key_value& kv = it->second; 
+        value = kv.value;
+        is_tombstone = kv.tombstone;
+        return true;
+    }
 
-return false; // Key not found in map
+    return false; 
  
 }
+
 // --- LSM_Tree Class Implementation ---
-lsm_tree::lsm_tree() : next_run_id_(0), shutdown_requested_(false) { // --- MODIFY THIS --- Initialize atomic flag
-    // memtable_ptr_ = new memtable(); // OLD
+lsm_tree::lsm_tree() : next_run_id_(0), shutdown_requested_(false) { 
     memtable_ptr_ = new memtable(MEMTABLE_CAPACITY);
 
-    levels_.resize(MAX_LEVELS + 1, nullptr); // levels_[0] unused
+    levels_.resize(MAX_LEVELS + 1, nullptr); 
     // 1. Create root data directory
     if (!create_directory(DATA_DIR)) {
         throw std::runtime_error("Failed to create or access data directory: " + DATA_DIR);
     }
 
-    long long max_run_id_found = -1; // To track the highest run ID for generating new names
+    long long max_run_id_found = -1; 
 
     // 2. Create levels and load existing SSTables in order, rebuilding run info
     for (int i = 1; i <= MAX_LEVELS; ++i) {
         // Set capacity based on level number (exponentially increasing)
-        // Note: Tiering doesn't use hard capacities like this, but we keep it as a concept.
         levels_[i] = new level(INITIAL_LEVEL_CAPACITY * static_cast<int>(std::pow(SIZE_RATIO, i-1)), i);
         if (i > 1) {
             levels_[i-1]->next_ = levels_[i];
@@ -417,7 +414,6 @@ lsm_tree::lsm_tree() : next_run_id_(0), shutdown_requested_(false) { // --- MODI
             throw std::runtime_error("Failed to create or access level directory: " + level_dir);
         }
 
-        // --- Collect, Sort, and Load existing files for this level ---
         std::vector<std::string> found_sstable_paths;
 
         DIR *dirp = opendir(level_dir.c_str());
@@ -432,7 +428,7 @@ lsm_tree::lsm_tree() : next_run_id_(0), shutdown_requested_(false) { // --- MODI
                 {
                     if (filename.length() > SST_FILE_SUFFIX.length() &&
                         filename.substr(filename.length() - SST_FILE_SUFFIX.length()) == SST_FILE_SUFFIX &&
-                        filename.rfind(SST_FILE_PREFIX) == 0) // Check if it starts with prefix
+                        filename.rfind(SST_FILE_PREFIX) == 0) 
                     {
                         // Found a potential SSTable file
                         found_sstable_paths.push_back(full_path);
@@ -461,30 +457,26 @@ lsm_tree::lsm_tree() : next_run_id_(0), shutdown_requested_(false) { // --- MODI
         }
 
         // Sort the collected file paths based on the run ID (oldest first)
-        // This ensures levels_[i]->sstable_runs_ is populated in chronological order (run_0, run_1, ...).
         std::sort(found_sstable_paths.begin(), found_sstable_paths.end(),
                 [](const std::string& a, const std::string& b) {
                     size_t prefix_len = SST_FILE_PREFIX.length();
                     size_t suffix_len = SST_FILE_SUFFIX.length();
 
-                    // Ensure both paths have the expected format
                     if (a.rfind(SST_FILE_PREFIX) != 0 || a.length() < prefix_len + suffix_len ||
                         b.rfind(SST_FILE_PREFIX) != 0 || b.length() < prefix_len + suffix_len ||
                         a.substr(a.length() - suffix_len) != SST_FILE_SUFFIX ||
                         b.substr(b.length() - suffix_len) != SST_FILE_SUFFIX) {
-                        // Fallback to string compare if format is unexpected s
                         return a < b;
                     }
 
                     try {
-                        // Extract and convert run IDs
                         long long run_id_a = std::stoll(a.substr(prefix_len, a.length() - prefix_len - suffix_len));
                         long long run_id_b = std::stoll(b.substr(prefix_len, b.length() - prefix_len - suffix_len));
 
-                        return run_id_a < run_id_b; // Sort by run ID ascending (oldest first)
+                        return run_id_a < run_id_b;
                     } catch (...) {
                         std::cerr << "Warning: Exception parsing run ID for sorting (fallback to string compare): " << a << " or " << b << std::endl;
-                        return a < b; // Fallback on exception
+                        return a < b; 
                     }
                 });
 
@@ -494,56 +486,46 @@ lsm_tree::lsm_tree() : next_run_id_(0), shutdown_requested_(false) { // --- MODI
 
             if (!loaded_run_info.filename.empty()) {
                 // Need to lock L<i> to add the run during constructor load
-                // Constructor runs single-threaded, so locking isn't strictly necessary *for thread safety*
-                // during the constructor itself, but it's good practice if this logic were moved.
                 levels_[i]->add_run(std::move(loaded_run_info));
             } else {
                 std::cerr << "Error: Failed to rebuild run info for " << full_path << " during load. Skipping." << std::endl;
             }
         }
-        // After this loop, levels_[i]->sstable_runs_ contains SSTableInfo objects sorted by run ID (oldest first).
-        // Iterating levels_[i]->sstable_runs_.rbegin() will correctly process newer runs first.
     }
 
     // Set the next run ID to be one greater than the highest found
     next_run_id_ = max_run_id_found + 1;
-    // std::cout << "DEBUG: Initialized next_run_id_ to " << next_run_id_ << std::endl; // Debug
 
-    // --- ADD THIS --- Start the background flusher thread
+    // Start the background flusher thread
     flusher_thread_ = std::thread(&lsm_tree::flushThreadLoop, this);
-    // std::cout << "DEBUG: Started flusher thread." << std::endl; // Optional debug
 }
 
 lsm_tree::~lsm_tree() {
-    shutdown_requested_.store(true); // Set atomic flag
-    flush_request_cv_.notify_one(); // Notify the flusher thread
-    // Perform final flush on shutdown
+    shutdown_requested_.store(true); 
+    flush_request_cv_.notify_one(); 
 
+    // Perform final flush on shutdown
     if (flusher_thread_.joinable()) {
     flusher_thread_.join();
 
-    // --- Wait for any pending background tasks ---
-    // std::cout << "DEBUG: Waiting for background tasks..." << std::endl; // Debug
+    // Wait for any pending background tasks
     for(auto& future : background_tasks_) {
         if(future.valid()) { // Check if the future holds a shared state
-            future.get(); // Wait for the task to complete
+            future.get(); 
         }
     }
-    background_tasks_.clear(); // Clear the vector of futures
+    background_tasks_.clear(); 
 
     // Clean up level pointers
-    // std::cout << "DEBUG: Deleting memtable and levels..." << std::endl; // Debug
     delete memtable_ptr_;
-    memtable_ptr_ = nullptr; // Avoid double delete
+    memtable_ptr_ = nullptr; 
     for (int i = 1; i <= MAX_LEVELS; ++i) {
         if (levels_[i]) {
-            // The level destructor handles deleting the sstable_runs_ vector and its contents.
             delete levels_[i];
-            levels_[i] = nullptr; // Avoid double delete
+            levels_[i] = nullptr; 
         }
     }
     // Physical files remain unless cleanup_files is called separately before deletion.
-    // std::cout << "DEBUG: LSM Tree shutdown complete." << std::endl; // Debug
     }
 }
 
@@ -558,11 +540,9 @@ SSTableInfo lsm_tree::write_sstable(const std::vector<key_value>& data, const st
     run_info.filename = filename;
 
     if (!data.empty()) {
-        // Set min/max keys from the input data (assuming input data is sorted)
+        // Set min/max keys from the input data
         run_info.min_key = data.front().key;
         run_info.max_key = data.back().key;
-        // If data is not guaranteed sorted here, find min/max by iterating or sorting
-        // Assuming data comes from memtable flush or merge, it should be sorted.
     } else {
          // Empty SSTable has no keys, set range to indicate no overlap
          run_info.min_key = std::numeric_limits<int>::max();
@@ -570,27 +550,23 @@ SSTableInfo lsm_tree::write_sstable(const std::vector<key_value>& data, const st
     }
 
     // Initialize Bloom Filter using the passed estimated_n_for_filter
-    // Handle the case where estimated_n_for_filter might be 0 if data is empty
     size_t n_for_filter = (estimated_n_for_filter > 0) ? estimated_n_for_filter : data.size();
     if (n_for_filter == 0 && !data.empty()) {
-         // Fallback if estimated_n_for_filter was 0 unexpectedly but data isn't empty
          n_for_filter = data.size();
     } else if (n_for_filter == 0 && data.empty()) {
-         // Truly empty, filter size 0 is fine
     }
 
     if (n_for_filter > 0) {
          run_info.filter = BloomFilter(n_for_filter, BLOOM_FILTER_FALSE_POSITIVE_RATE);
     } else {
-         // Handle case of empty data gracefully with a filter that does nothing
-         run_info.filter = BloomFilter(1, 1.0); // A filter for 1 element with 100% FP rate is basically empty
+         run_info.filter = BloomFilter(1, 1.0);
     }
 
 
     std::ofstream outfile(filename, std::ios::trunc);
     if (!outfile) {
         std::cerr << "Error: Could not open SSTable TXT file for writing: " << filename << std::endl;
-        return {}; // Indicate failure with default-constructed (invalid) info
+        return {};
     }
 
     long long current_block_byte_count = 0;
@@ -598,22 +574,20 @@ SSTableInfo lsm_tree::write_sstable(const std::vector<key_value>& data, const st
     for (size_t i = 0; i < data.size(); ++i) {
         const auto& kv = data[i];
 
-        // Add key to filter *after* initializing it (only if filter was created with size > 0)
+        // Add key to filter *after* initializing it
         if (n_for_filter > 0) {
             run_info.filter.add(kv.key);
         }
 
-
-        long long entry_start_offset = outfile.tellp(); // Get offset *before* writing line
+        long long entry_start_offset = outfile.tellp(); 
 
         outfile << kv.key << " " << kv.value << " " << (kv.tombstone ? 1 : 0) << "\n";
 
         if (!outfile) {
              std::cerr << "Error: Failed to write entry (" << kv.key << ") to SSTable TXT file: " << filename << std::endl;
              outfile.close();
-             // Attempt cleanup of partially written file
              std::remove(filename.c_str());
-             return {}; // Indicate failure
+             return {};
         }
 
         long long entry_end_offset = outfile.tellp();
@@ -621,238 +595,207 @@ SSTableInfo lsm_tree::write_sstable(const std::vector<key_value>& data, const st
         if (entry_end_offset != -1 && entry_start_offset != -1) {
              line_byte_size = entry_end_offset - entry_start_offset;
         } else if (entry_end_offset == -1) {
-             // Fallback if tellp failed after writing
-             // Rough estimate: key (int), value (int), tombstone (int), 2 spaces, 1 newline
-             // Adjust if value is string: std::to_string(kv.key).length() + kv.value.length() + 3;
              line_byte_size = std::to_string(kv.key).length() + std::to_string(kv.value).length() + std::to_string(kv.tombstone ? 1 : 0).length() + 2 + 1;
              std::cerr << "Warning: Using estimated line size for fence pointer calculation in " << filename << " due to tellp failure." << std::endl;
         }
 
 
         // Determine the offset for a potential fence pointer for THIS key
-        // This offset is the start of the *current line*.
-        long long offset_for_this_line = entry_start_offset; // Renamed for clarity
+        long long offset_for_this_line = entry_start_offset;
 
         if (offset_for_this_line == -1) {
-             // Fallback if tellp() failed at the start of this line.
-             // Using 0 as a fallback for the offset is the safest option if precise offset is unknown.
              std::cerr << "Warning: Failed to get start offset for key " << kv.key << " in " << filename << ". Using 0 as fallback offset for fence pointer." << std::endl;
-             offset_for_this_line = 0; // Use 0 as fallback
+             offset_for_this_line = 0;
         }
 
-
         // Add fence pointer if block condition met
-        // Use the *key* of the *first* entry in the block (which is kv.key here).
-        // The offset for the fence pointer points to the start of the block (the start of this line's data).
         if (current_block_byte_count >= BLOCK_SIZE || run_info.fence_pointers.empty()) {
             // Use the calculated offset for the fence pointer
-            run_info.fence_pointers.push_back({kv.key, offset_for_this_line}); // <-- FIXED: Now uses offset_for_this_line
-
-            // Reset block byte count with the size of the line just written
+            run_info.fence_pointers.push_back({kv.key, offset_for_this_line});
             current_block_byte_count = line_byte_size;
         } else {
            // If not adding a fence pointer, just accumulate the line size
            current_block_byte_count += line_byte_size;
         }
-    } // End for loop
-
+    }
 
     outfile.close();
     if (!outfile) {
         std::cerr << "Error: Failed to close SSTable TXT file properly: " << filename << std::endl;
-         std::remove(filename.c_str()); // Delete potentially incomplete file
-         return {}; // Indicate failure
+         std::remove(filename.c_str()); 
+         return {}; 
     }
-    return run_info; // Return the successfully created SSTableInfo
-
+    return run_info; 
 }
 
 void lsm_tree::delete_sst_files(const std::vector<std::string>& filenames) {
-    std::lock_guard<std::mutex> delete_lock(file_delete_mutex_); // Acquire mutex for file deletion
+    // Acquire mutex for file deletion
+    std::lock_guard<std::mutex> delete_lock(file_delete_mutex_);
     for (const auto& filename : filenames) {
-        // std::cerr << "DEBUG DELETE: - Attempting delete: " << filename << std::endl; // Debug
         if (std::remove(filename.c_str()) != 0) {
-            // It's OK if the file doesn't exist (ENOENT) - another thread might have deleted it.
-            // Other errors (like permissions) should still be reported.
             if (errno != ENOENT) { // ENOENT is "No such file or directory"
                 std::cerr << "ERROR DELETE: Could not delete SSTable file: " << filename << " (" << strerror(errno) << ")" << std::endl;
             } else {
-                // std::cerr << "DEBUG DELETE: - File already deleted: " << filename << std::endl; // Debug
             }
-            } else {
-            // std::cerr << "DEBUG DELETE: - Successfully deleted: " << filename << std::endl; // Debug
+        } else {
         }
     }
 }
 
 SSTableInfo lsm_tree::merge_runs(int target_level_num, const std::vector<SSTableInfo>& runs_to_merge_info, size_t estimated_n_for_filter) {
-if (runs_to_merge_info.empty()) {
-    return {"", {}, {}};
-}
+    if (runs_to_merge_info.empty()) {
+        return {"", {}, {}};
+    }
 
-// std::cerr << "DEBUG MERGE: == Starting merge into level " << target_level_num << ". Merging " << runs_to_merge_info.size() << " runs. ==" << std::endl; // Debug
+    // Input streams must be kept in the order of run_to_merge_info indices (oldest first)
+    std::vector<std::ifstream> input_streams;
+    input_streams.reserve(runs_to_merge_info.size());
 
-// Input streams must be kept in the order of run_to_merge_info indices (oldest first)
-std::vector<std::ifstream> input_streams;
-input_streams.reserve(runs_to_merge_info.size());
+    // Use min-heap to get smallest key, prioritizing newest version (larger stream_index) for duplicates
+    priority_queue<merge_entry, vector<merge_entry>, greater<merge_entry>> min_heap;
 
-// Use min-heap to get smallest key, prioritizing newest version (larger stream_index) for duplicates
-priority_queue<merge_entry, vector<merge_entry>, greater<merge_entry>> min_heap;
+    // Open all input TXT files and read the FIRST entry from EACH
+    for (size_t i = 0; i < runs_to_merge_info.size(); ++i) {
+        const std::string& filename = runs_to_merge_info[i].filename;
+        input_streams.emplace_back(filename);
 
-// Open all input TXT files and read the FIRST entry from EACH
-for (size_t i = 0; i < runs_to_merge_info.size(); ++i) {
-    const std::string& filename = runs_to_merge_info[i].filename;
-    input_streams.emplace_back(filename); // Open stream
+        if (!input_streams.back()) {
+            std::cerr << "Error: Could not open TXT file for merge: " << filename << std::endl;
+            for(auto& stream : input_streams) if(stream.is_open()) stream.close();
+            return {"", {}, {}}; // Indicate failure
+        }
 
-    if (!input_streams.back()) {
-        std::cerr << "Error: Could not open TXT file for merge: " << filename << std::endl;
-        // Attempt to close already opened streams before returning
+        std::string line;
+        if (std::getline(input_streams.back(), line)) {
+            if (!line.empty()) {
+                std::stringstream ss(line);
+                int current_key, current_value, tombstone_flag;
+                if (ss >> current_key >> current_value >> tombstone_flag) {
+                    min_heap.push({{current_key, current_value, (tombstone_flag == 1)}, i}); 
+                } else {
+                    std::cerr << "Warning: Failed to parse initial line correctly in merge file: " << filename << ", line: '" << line << "'" << std::endl;
+                }
+            }
+        } else {
+            if (!input_streams.back().eof() && input_streams.back().fail()) {
+                std::cerr << "Warning: Failed initial read from TXT file: " << filename << std::endl;
+            }
+        }
+    }
+
+    std::string output_filename = generate_sstable_filename(target_level_num); // acquires id_mutex_
+    std::ofstream outfile(output_filename, std::ios::trunc);
+    if (!outfile) {
+        std::cerr << "Error: Could not open output TXT file for merge: " << output_filename << std::endl;
         for(auto& stream : input_streams) if(stream.is_open()) stream.close();
         return {"", {}, {}}; // Indicate failure
     }
 
-    std::string line;
-    if (std::getline(input_streams.back(), line)) {
-         if (!line.empty()) {
-             std::stringstream ss(line);
-             int current_key, current_value, tombstone_flag;
-             if (ss >> current_key >> current_value >> tombstone_flag) {
-                min_heap.push({{current_key, current_value, (tombstone_flag == 1)}, i}); // Use index i as stream_index
-             } else {
-                  std::cerr << "Warning: Failed to parse initial line correctly in merge file: " << filename << ", line: '" << line << "'" << std::endl;
-             }
-         }
-    } else {
-         if (!input_streams.back().eof() && input_streams.back().fail()) {
-             std::cerr << "Warning: Failed initial read from TXT file: " << filename << std::endl;
-         }
-         // File is empty or failed, stream won't be pushed to heap
-    }
-}
+    SSTableInfo merged_run_info;
+    merged_run_info.filename = output_filename;
+    merged_run_info.filter = BloomFilter(estimated_n_for_filter, BLOOM_FILTER_FALSE_POSITIVE_RATE);
 
+    long long current_block_byte_count = 0;
 
-// Generate output filename *after* opening inputs successfully
-std::string output_filename = generate_sstable_filename(target_level_num); // acquires id_mutex_
-std::ofstream outfile(output_filename, std::ios::trunc);
-if (!outfile) {
-    std::cerr << "Error: Could not open output TXT file for merge: " << output_filename << std::endl;
-    for(auto& stream : input_streams) if(stream.is_open()) stream.close();
-    return {"", {}, {}}; // Indicate failure
-}
-
-SSTableInfo merged_run_info;
-merged_run_info.filename = output_filename;
-// Use a heuristic estimated_n for the Bloom filter in the merged run.
-// A more precise estimate would count keys during the merge, but that adds complexity.
-merged_run_info.filter = BloomFilter(estimated_n_for_filter, BLOOM_FILTER_FALSE_POSITIVE_RATE);
-
-long long current_block_byte_count = 0;
-
-// Merge process
-while (!min_heap.empty()) {
-    // Get the top element - this is the smallest key overall.
-    // Due to the comparator, if duplicates exist for this key, this is the newest version.
-    merge_entry current_newest_for_key = min_heap.top();
-    min_heap.pop();
-
-    int current_key = current_newest_for_key.kv.key;
-
-    // Discard any remaining elements at the top of the heap with the SAME KEY.
-    // These are older duplicates. We need to advance their streams.
-    std::vector<size_t> streams_to_advance;
-    streams_to_advance.push_back(current_newest_for_key.stream_index); // The newest version's stream also needs advancing
-
-    while (!min_heap.empty() && min_heap.top().kv.key == current_key) {
-        merge_entry older_version = min_heap.top();
+    // Merge process
+    while (!min_heap.empty()) {
+        // Get the top element - this is the smallest key overall.
+        // Due to the comparator, if duplicates exist for this key, this is the newest version.
+        merge_entry current_newest_for_key = min_heap.top();
         min_heap.pop();
-        streams_to_advance.push_back(older_version.stream_index); // Collect stream index
+
+        int current_key = current_newest_for_key.kv.key;
+
+        // Discard any remaining elements at the top of the heap with the SAME KEY.
+        // These are older duplicates. We need to advance their streams.
+        std::vector<size_t> streams_to_advance;
+        streams_to_advance.push_back(current_newest_for_key.stream_index); // The newest version's stream also needs advancing
+
+        while (!min_heap.empty() && min_heap.top().kv.key == current_key) {
+            merge_entry older_version = min_heap.top();
+            min_heap.pop();
+            streams_to_advance.push_back(older_version.stream_index); // Collect stream index
+        }
+
+        // Process the newest version: Write if not tombstone
+        if (!current_newest_for_key.kv.tombstone) {
+            merged_run_info.filter.add(current_newest_for_key.kv.key);
+
+            long long entry_start_offset = outfile.tellp();
+            if (entry_start_offset == -1) { std::cerr << "Warning: tellp() failed before writing entry to merged file " << output_filename << ". Fence pointers might be inaccurate." << std::endl; }
+            outfile << current_newest_for_key.kv.key << " " << current_newest_for_key.kv.value << " " << (current_newest_for_key.kv.tombstone ? 1 : 0) << "\n";
+
+            if (!outfile) {
+                std::cerr << "Error writing during merge to TXT file: " << output_filename << std::endl;
+                outfile.close(); for(auto& stream : input_streams) if(stream.is_open()) stream.close(); std::remove(output_filename.c_str()); return {"", {}, {}}; // Indicate failure
+            }
+
+            long long entry_end_offset = outfile.tellp();
+            long long line_byte_size = 0;
+            if (entry_end_offset != -1 && entry_start_offset != -1) { line_byte_size = entry_end_offset - entry_start_offset; }
+            else if (entry_end_offset == -1) { line_byte_size = std::to_string(current_newest_for_key.kv.key).length() + std::to_string(current_newest_for_key.kv.value).length() + 3; } // Rough estimate
+
+            // Fence Pointer Logic
+            long long offset_for_this_key_fp;
+            if (entry_start_offset != -1) {
+                offset_for_this_key_fp = entry_start_offset;
+            } else {
+                std::cerr << "Warning: Skipped adding precise fence pointer for key " << current_newest_for_key.kv.key << " in " << output_filename << " due to failed tellp() at start of line. Using offset 0 as fallback." << std::endl;
+                offset_for_this_key_fp = 0;
+            }
+
+            if (current_block_byte_count >= BLOCK_SIZE || merged_run_info.fence_pointers.empty()) {
+                merged_run_info.fence_pointers.push_back({current_newest_for_key.kv.key, offset_for_this_key_fp});
+                current_block_byte_count = line_byte_size;
+            } else {
+                current_block_byte_count += line_byte_size;
+            }
+        }
+
+        // Advance streams for all versions collected in this batch
+        for (size_t stream_idx : streams_to_advance) {
+            if (input_streams[stream_idx].is_open()) {
+                std::string next_line;
+                if (std::getline(input_streams[stream_idx], next_line)) {
+                    if (!next_line.empty()) {
+                        std::stringstream ss(next_line);
+                        int next_key, next_value, next_tombstone_flag;
+                        if (ss >> next_key >> next_value >> next_tombstone_flag) {
+                            min_heap.push({{next_key, next_value, (next_tombstone_flag == 1)}, stream_idx});
+                        } else {
+                            std::cerr << "Warning: Failed to parse line after advancing stream " << stream_idx << " (file: " << runs_to_merge_info[stream_idx].filename << ") for key " << current_key << ": '" << next_line << "'" << std::endl;
+                        }
+                    }
+                } else {
+                    if (!input_streams[stream_idx].eof() && input_streams[stream_idx].fail()) {
+                        std::cerr << "Warning: Failed read from TXT file : " << runs_to_merge_info[stream_idx].filename << std::endl;
+                    }
+                    input_streams[stream_idx].close();
+                }
+            }
+        }
+    } 
+
+    // Close output file
+    outfile.close();
+    if (!outfile) {
+        std::cerr << "Error closing merged output TXT file properly: " << output_filename << std::endl;
+        std::remove(output_filename.c_str()); 
+        return {"", {}, {}}; 
     }
 
-    // --- Process the newest version: Write if not tombstone. ---
-    if (!current_newest_for_key.kv.tombstone) {
-         merged_run_info.filter.add(current_newest_for_key.kv.key);
-
-         long long entry_start_offset = outfile.tellp();
-          if (entry_start_offset == -1) { std::cerr << "Warning: tellp() failed before writing entry to merged file " << output_filename << ". Fence pointers might be inaccurate." << std::endl; }
-         outfile << current_newest_for_key.kv.key << " " << current_newest_for_key.kv.value << " " << (current_newest_for_key.kv.tombstone ? 1 : 0) << "\n";
-
-         if (!outfile) {
-             std::cerr << "Error writing during merge to TXT file: " << output_filename << std::endl;
-              outfile.close(); for(auto& stream : input_streams) if(stream.is_open()) stream.close(); std::remove(output_filename.c_str()); return {"", {}, {}}; // Indicate failure
-         }
-
-         long long entry_end_offset = outfile.tellp();
-         long long line_byte_size = 0;
-         if (entry_end_offset != -1 && entry_start_offset != -1) { line_byte_size = entry_end_offset - entry_start_offset; }
-          else if (entry_end_offset == -1) { line_byte_size = std::to_string(current_newest_for_key.kv.key).length() + std::to_string(current_newest_for_key.kv.value).length() + 3; } // Rough estimate
-
-         // --- Corrected Fence Pointer Logic ---
-         long long offset_for_this_key_fp;
-         if (entry_start_offset != -1) {
-              offset_for_this_key_fp = entry_start_offset;
-         } else {
-              // If we couldn't get the precise start offset, fall back to 0.
-              std::cerr << "Warning: Skipped adding precise fence pointer for key " << current_newest_for_key.kv.key << " in " << output_filename << " due to failed tellp() at start of line. Using offset 0 as fallback." << std::endl;
-              offset_for_this_key_fp = 0;
-         }
-
-         if (current_block_byte_count >= BLOCK_SIZE || merged_run_info.fence_pointers.empty()) {
-              merged_run_info.fence_pointers.push_back({current_newest_for_key.kv.key, offset_for_this_key_fp});
-              current_block_byte_count = line_byte_size;
-         } else {
-             current_block_byte_count += line_byte_size;
-         }
-         // --- End Corrected Fence Pointer Logic ---
-
-    } // else: it was a tombstone, we discard it
-
-    // --- Advance streams for all versions collected in this batch ---
-    for (size_t stream_idx : streams_to_advance) {
-        if (input_streams[stream_idx].is_open()) {
-             std::string next_line;
-             if (std::getline(input_streams[stream_idx], next_line)) {
-                 if (!next_line.empty()) {
-                     std::stringstream ss(next_line);
-                     int next_key, next_value, next_tombstone_flag;
-                     if (ss >> next_key >> next_value >> next_tombstone_flag) {
-                         min_heap.push({{next_key, next_value, (next_tombstone_flag == 1)}, stream_idx});
-                     } else {
-                          std::cerr << "Warning: Failed to parse line after advancing stream " << stream_idx << " (file: " << runs_to_merge_info[stream_idx].filename << ") for key " << current_key << ": '" << next_line << "'" << std::endl;
-                     }
-                 } // else: read an empty line, stream is advanced, nothing to push
-             } else {
-                  // getline failed (EOF or read error)
-                 if (!input_streams[stream_idx].eof() && input_streams[stream_idx].fail()) {
-                     std::cerr << "Warning: Failed read from TXT file : " << runs_to_merge_info[stream_idx].filename << std::endl;
-                 }
-                 input_streams[stream_idx].close(); // Close stream when exhausted or failed
-             }
+    // Close any remaining input streams (should all be closed by now if successful)
+    for (auto& stream : input_streams) {
+        if (stream.is_open()) {
+            std::cerr << "Warning: Input stream was still open after merge loop. Closing." << std::endl;
+            stream.close();
         }
     }
-} // End while(!min_heap.empty())
 
-// Close output file
-outfile.close();
-if (!outfile) {
-    std::cerr << "Error closing merged output TXT file properly: " << output_filename << std::endl;
-     std::remove(output_filename.c_str()); // Delete potentially incomplete file
-     return {"", {}, {}}; // Indicate failure
+    return merged_run_info;
 }
 
-// Close any remaining input streams (should all be closed by now if successful)
-for (auto& stream : input_streams) {
-    if (stream.is_open()) {
-         std::cerr << "Warning: Input stream was still open after merge loop. Closing." << std::endl;
-         stream.close();
-    }
-}
-
-return merged_run_info; // Return info for the successful merge
- 
-}
-// Function to check and trigger merges starting from a level
-// lsm_tree.cpp
-// Function to check and trigger merges starting from a level
+// Check and trigger merges starting from a level
 void lsm_tree::check_and_trigger_merge(int level_num) {
 if (level_num < 1 || level_num > MAX_LEVELS) {
 return;
