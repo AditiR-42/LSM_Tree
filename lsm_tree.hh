@@ -13,6 +13,7 @@
 #include <tuple>    // For std::tuple
 #include <optional> // For std::optional
 #include <map>
+#include <limits>
 
 #include "bloom_filter.hh"
 
@@ -55,8 +56,10 @@ struct SSTableInfo {
     std::vector<std::pair<int, long long>> fence_pointers;
     BloomFilter filter; // BloomFilter::contains is const and should be safe for concurrent reads
 
-    SSTableInfo(std::string fn = "", std::vector<std::pair<int, long long>> fp = {}, BloomFilter bf = BloomFilter())
-        : filename(std::move(fn)), fence_pointers(std::move(fp)), filter(std::move(bf)) {}
+    int min_key = std::numeric_limits<int>::max(); // <--- ADD THIS
+    int max_key = std::numeric_limits<int>::min(); // <--- ADD THIS
+
+    SSTableInfo() = default;
 
     // Enable move semantics for efficient transfer
     SSTableInfo(const SSTableInfo& other) = default;
