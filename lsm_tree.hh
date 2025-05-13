@@ -105,12 +105,14 @@ public:
 class memtable {
 public:
     std::map<int, key_value> memtable_;
-    int capacity_ = MEMTABLE_CAPACITY;
+    size_t capacity_ = 0;   // Store the capacity passed during construction
+    size_t cur_size_ = 0;     // Track current number of entries
     std::mutex memtable_mutex_;
 
+    memtable(size_t capacity);
     memtable();
 
-    bool insert(key_value kv_pair);
+    void insert(key_value kv_pair, bool& trigger_flush);
 
     bool is_full() const {
         return memtable_.size() >= static_cast<decltype(memtable_)::size_type>(capacity_);
@@ -132,6 +134,16 @@ private:
     mutable std::mutex cout_mutex_; // Use mutable because printing from const methods needs lock
     std::mutex file_delete_mutex_;
     std::vector<std::future<void>> background_tasks_;
+
+    // --- ADD THESE ---
+    std::thread flusher_thread_;         // Dedicated thread for flushing memtable
+    std::mutex flush_mutex_;            // Mutex to protect flush_needed_
+    std::condition_variable flush_request_cv_; // Condition variable to wake flusher
+    bool flush_needed_ = false;         // Flag to signal flusher thread
+    std::atomic<bool> shutdown_requested_ = false; // Atomic flag for graceful shutdown
+
+    // Declare the new member function
+    void flushThreadLoop();
 
     // Helper to generate unique SSTable filenames
     std::string generate_sstable_filename(int level_num);

@@ -357,24 +357,28 @@ void level::clear_runs() {
 }
 
 // --- Memtable Class Implementation ---
-memtable::memtable() {
+memtable::memtable(size_t capacity) : capacity_(capacity), cur_size_(0) {
 }
-bool memtable::insert(key_value kv_pair) {
-std::lock_guard<std::mutex> lock(memtable_mutex_);
-// Map handles updates automatically. Check if full *before* insertion.
-// Check if key exists to see if it's an update or a new insert for capacity check
-    bool is_update = memtable_.count(kv_pair.key) > 0;
 
-    if (!is_update && is_full()) {
-        return false; // Cannot insert new key if full
-    }
+memtable::memtable() : capacity_(MEMTABLE_CAPACITY), cur_size_(0) {
+     // memtable_ is default-initialized
+}
+
+void memtable::insert(key_value kv_pair, bool& trigger_flush) {
+    std::lock_guard<std::mutex> lock(memtable_mutex_);
+    bool is_update = memtable_.count(kv_pair.key) > 0;
 
     // Insert or update the key. Map handles existing keys by replacement.
     memtable_[kv_pair.key] = kv_pair;
 
-    return true;
- 
+    // If it was a new key, increment size
+    if (!is_update) {
+        cur_size_++;
+    }
+
+    trigger_flush = (cur_size_ >= capacity_);
 }
+
 std::vector<key_value> memtable::flush() {
     std::lock_guard<std::mutex> lock(memtable_mutex_);
     // Copy elements from the map to a vector
@@ -407,147 +411,138 @@ return false; // Key not found in map
  
 }
 // --- LSM_Tree Class Implementation ---
-lsm_tree::lsm_tree() : next_run_id_(0) {
-memtable_ptr_ = new memtable();
-levels_.resize(MAX_LEVELS + 1, nullptr); // levels_[0] unused
-// 1. Create root data directory
-if (!create_directory(DATA_DIR)) {
-    throw std::runtime_error("Failed to create or access data directory: " + DATA_DIR);
-}
+lsm_tree::lsm_tree() : next_run_id_(0), shutdown_requested_(false) { // --- MODIFY THIS --- Initialize atomic flag
+    // memtable_ptr_ = new memtable(); // OLD
+    memtable_ptr_ = new memtable(MEMTABLE_CAPACITY);
 
-long long max_run_id_found = -1; // To track the highest run ID for generating new names
-
-// 2. Create levels and load existing SSTables in order, rebuilding run info
-for (int i = 1; i <= MAX_LEVELS; ++i) {
-    // Set capacity based on level number (exponentially increasing)
-    // Note: Tiering doesn't use hard capacities like this, but we keep it as a concept.
-    levels_[i] = new level(INITIAL_LEVEL_CAPACITY * static_cast<int>(std::pow(SIZE_RATIO, i-1)), i);
-    if (i > 1) {
-        levels_[i-1]->next_ = levels_[i];
+    levels_.resize(MAX_LEVELS + 1, nullptr); // levels_[0] unused
+    // 1. Create root data directory
+    if (!create_directory(DATA_DIR)) {
+        throw std::runtime_error("Failed to create or access data directory: " + DATA_DIR);
     }
 
-    // Create level subdirectory
-    std::string level_dir = DATA_DIR + "/L" + std::to_string(i);
-    if (!create_directory(level_dir)) {
-         throw std::runtime_error("Failed to create or access level directory: " + level_dir);
-    }
+    long long max_run_id_found = -1; // To track the highest run ID for generating new names
 
-    // --- Collect, Sort, and Load existing files for this level ---
-    std::vector<std::string> found_sstable_paths;
+    // 2. Create levels and load existing SSTables in order, rebuilding run info
+    for (int i = 1; i <= MAX_LEVELS; ++i) {
+        // Set capacity based on level number (exponentially increasing)
+        // Note: Tiering doesn't use hard capacities like this, but we keep it as a concept.
+        levels_[i] = new level(INITIAL_LEVEL_CAPACITY * static_cast<int>(std::pow(SIZE_RATIO, i-1)), i);
+        if (i > 1) {
+            levels_[i-1]->next_ = levels_[i];
+        }
 
-    DIR *dirp = opendir(level_dir.c_str());
-    if (dirp) {
-        struct dirent *dp;
-        while ((dp = readdir(dirp)) != nullptr) {
-            std::string filename = dp->d_name;
-            std::string full_path = level_dir + "/" + filename;
+        // Create level subdirectory
+        std::string level_dir = DATA_DIR + "/L" + std::to_string(i);
+        if (!create_directory(level_dir)) {
+            throw std::runtime_error("Failed to create or access level directory: " + level_dir);
+        }
 
-            struct stat file_stat;
-            if (stat(full_path.c_str(), &file_stat) == 0 && S_ISREG(file_stat.st_mode))
-            {
-                 if (filename.length() > SST_FILE_SUFFIX.length() &&
-                     filename.substr(filename.length() - SST_FILE_SUFFIX.length()) == SST_FILE_SUFFIX &&
-                     filename.rfind(SST_FILE_PREFIX) == 0) // Check if it starts with prefix
+        // --- Collect, Sort, and Load existing files for this level ---
+        std::vector<std::string> found_sstable_paths;
+
+        DIR *dirp = opendir(level_dir.c_str());
+        if (dirp) {
+            struct dirent *dp;
+            while ((dp = readdir(dirp)) != nullptr) {
+                std::string filename = dp->d_name;
+                std::string full_path = level_dir + "/" + filename;
+
+                struct stat file_stat;
+                if (stat(full_path.c_str(), &file_stat) == 0 && S_ISREG(file_stat.st_mode))
                 {
-                    // Found a potential SSTable file
-                    found_sstable_paths.push_back(full_path);
+                    if (filename.length() > SST_FILE_SUFFIX.length() &&
+                        filename.substr(filename.length() - SST_FILE_SUFFIX.length()) == SST_FILE_SUFFIX &&
+                        filename.rfind(SST_FILE_PREFIX) == 0) // Check if it starts with prefix
+                    {
+                        // Found a potential SSTable file
+                        found_sstable_paths.push_back(full_path);
 
-                    // Also update max_run_id_found
-                    size_t prefix_len = SST_FILE_PREFIX.length();
-                    size_t suffix_len = SST_FILE_SUFFIX.length();
-                    size_t sst_pos = filename.length() - suffix_len;
+                        // Also update max_run_id_found
+                        size_t prefix_len = SST_FILE_PREFIX.length();
+                        size_t suffix_len = SST_FILE_SUFFIX.length();
+                        size_t sst_pos = filename.length() - suffix_len;
 
-                    if (sst_pos > prefix_len) {
-                         try {
-                             long long run_id = std::stoll(filename.substr(prefix_len, sst_pos - prefix_len));
-                             if (run_id > max_run_id_found) {
-                                 max_run_id_found = run_id;
-                             }
-                         } catch (...) {
-                              std::cerr << "Warning: Could not parse run ID from filename for max_run_id_found: " << filename << std::endl;
-                         }
+                        if (sst_pos > prefix_len) {
+                            try {
+                                long long run_id = std::stoll(filename.substr(prefix_len, sst_pos - prefix_len));
+                                if (run_id > max_run_id_found) {
+                                    max_run_id_found = run_id;
+                                }
+                            } catch (...) {
+                                std::cerr << "Warning: Could not parse run ID from filename for max_run_id_found: " << filename << std::endl;
+                            }
+                        }
                     }
                 }
             }
+            closedir(dirp);
+        } else {
+            std::cerr << "Warning: Could not open level directory for reading: " << level_dir << std::endl;
         }
-        closedir(dirp);
-    } else {
-         std::cerr << "Warning: Could not open level directory for reading: " << level_dir << std::endl;
-    }
 
-    // Sort the collected file paths based on the run ID (oldest first)
-    // This ensures levels_[i]->sstable_runs_ is populated in chronological order (run_0, run_1, ...).
-    std::sort(found_sstable_paths.begin(), found_sstable_paths.end(),
-              [](const std::string& a, const std::string& b) {
-                  size_t prefix_len = SST_FILE_PREFIX.length();
-                  size_t suffix_len = SST_FILE_SUFFIX.length();
+        // Sort the collected file paths based on the run ID (oldest first)
+        // This ensures levels_[i]->sstable_runs_ is populated in chronological order (run_0, run_1, ...).
+        std::sort(found_sstable_paths.begin(), found_sstable_paths.end(),
+                [](const std::string& a, const std::string& b) {
+                    size_t prefix_len = SST_FILE_PREFIX.length();
+                    size_t suffix_len = SST_FILE_SUFFIX.length();
 
-                  // Ensure both paths have the expected format
-                  if (a.rfind(SST_FILE_PREFIX) != 0 || a.length() < prefix_len + suffix_len ||
-                      b.rfind(SST_FILE_PREFIX) != 0 || b.length() < prefix_len + suffix_len ||
-                      a.substr(a.length() - suffix_len) != SST_FILE_SUFFIX ||
-                      b.substr(b.length() - suffix_len) != SST_FILE_SUFFIX) {
-                       // Fallback to string compare if format is unexpected s
-                       return a < b;
-                  }
+                    // Ensure both paths have the expected format
+                    if (a.rfind(SST_FILE_PREFIX) != 0 || a.length() < prefix_len + suffix_len ||
+                        b.rfind(SST_FILE_PREFIX) != 0 || b.length() < prefix_len + suffix_len ||
+                        a.substr(a.length() - suffix_len) != SST_FILE_SUFFIX ||
+                        b.substr(b.length() - suffix_len) != SST_FILE_SUFFIX) {
+                        // Fallback to string compare if format is unexpected s
+                        return a < b;
+                    }
 
-                  try {
-                      // Extract and convert run IDs
-                      long long run_id_a = std::stoll(a.substr(prefix_len, a.length() - prefix_len - suffix_len));
-                      long long run_id_b = std::stoll(b.substr(prefix_len, b.length() - prefix_len - suffix_len));
+                    try {
+                        // Extract and convert run IDs
+                        long long run_id_a = std::stoll(a.substr(prefix_len, a.length() - prefix_len - suffix_len));
+                        long long run_id_b = std::stoll(b.substr(prefix_len, b.length() - prefix_len - suffix_len));
 
-                      return run_id_a < run_id_b; // Sort by run ID ascending (oldest first)
-                  } catch (...) {
-                      std::cerr << "Warning: Exception parsing run ID for sorting (fallback to string compare): " << a << " or " << b << std::endl;
-                      return a < b; // Fallback on exception
-                  }
-              });
+                        return run_id_a < run_id_b; // Sort by run ID ascending (oldest first)
+                    } catch (...) {
+                        std::cerr << "Warning: Exception parsing run ID for sorting (fallback to string compare): " << a << " or " << b << std::endl;
+                        return a < b; // Fallback on exception
+                    }
+                });
 
-    // Now rebuild info (including BF and FP) and add runs to the level in sorted order
-    for(const auto& full_path : found_sstable_paths) {
-         SSTableInfo loaded_run_info = rebuild_run_info(full_path);
+        // Now rebuild info (including BF and FP) and add runs to the level in sorted order
+        for(const auto& full_path : found_sstable_paths) {
+            SSTableInfo loaded_run_info = rebuild_run_info(full_path);
 
-         if (!loaded_run_info.filename.empty()) {
-             // Need to lock L<i> to add the run during constructor load
-             // Constructor runs single-threaded, so locking isn't strictly necessary *for thread safety*
-             // during the constructor itself, but it's good practice if this logic were moved.
-             levels_[i]->add_run(std::move(loaded_run_info));
-         } else {
-             std::cerr << "Error: Failed to rebuild run info for " << full_path << " during load. Skipping." << std::endl;
-         }
-    }
-    // After this loop, levels_[i]->sstable_runs_ contains SSTableInfo objects sorted by run ID (oldest first).
-    // Iterating levels_[i]->sstable_runs_.rbegin() will correctly process newer runs first.
-}
-
- // Set the next run ID to be one greater than the highest found
-next_run_id_ = max_run_id_found + 1;
- // std::cout << "DEBUG: Initialized next_run_id_ to " << next_run_id_ << std::endl; // Debug
- 
-}
-lsm_tree::~lsm_tree() {
-// Perform final flush on shutdown
-// std::cout << "DEBUG: Shutting down LSM Tree..." << std::endl; // Debug
-    if (memtable_ptr_ && !memtable_ptr_->memtable_.empty()) {
-        // std::cout << "DEBUG: Final memtable flush..." << std::endl; // Debug
-        std::vector<key_value> data_to_flush = memtable_ptr_->flush(); // flush acquires memtable lock
-        if (!data_to_flush.empty()) {
-            std::string final_sstable_file = generate_sstable_filename(1); // acquires id_mutex_
-            SSTableInfo final_run_info = write_sstable(data_to_flush, final_sstable_file, data_to_flush.size());
-            if (!final_run_info.filename.empty()) {
-                if (levels_.size() > 1 && levels_[1]) {
-                // Need to lock L1 to add the run
-                std::lock_guard<std::mutex> l1_lock(levels_[1]->level_mutex_);
-                levels_[1]->add_run(std::move(final_run_info)); // add_run assumes lock held
-                // std::cout << "DEBUG: Added final flush run " << final_run_info.filename << " to L1." << std::endl; // Debug
-                } else {
-                    std::cerr << "Error: Level 1 not available during final flush cleanup." << std::endl;
-                }
-                } else {
-                    std::cerr << "Error: Failed to write final memtable flush to disk during shutdown!" << std::endl;
+            if (!loaded_run_info.filename.empty()) {
+                // Need to lock L<i> to add the run during constructor load
+                // Constructor runs single-threaded, so locking isn't strictly necessary *for thread safety*
+                // during the constructor itself, but it's good practice if this logic were moved.
+                levels_[i]->add_run(std::move(loaded_run_info));
+            } else {
+                std::cerr << "Error: Failed to rebuild run info for " << full_path << " during load. Skipping." << std::endl;
             }
         }
+        // After this loop, levels_[i]->sstable_runs_ contains SSTableInfo objects sorted by run ID (oldest first).
+        // Iterating levels_[i]->sstable_runs_.rbegin() will correctly process newer runs first.
     }
+
+    // Set the next run ID to be one greater than the highest found
+    next_run_id_ = max_run_id_found + 1;
+    // std::cout << "DEBUG: Initialized next_run_id_ to " << next_run_id_ << std::endl; // Debug
+
+    // --- ADD THIS --- Start the background flusher thread
+    flusher_thread_ = std::thread(&lsm_tree::flushThreadLoop, this);
+    // std::cout << "DEBUG: Started flusher thread." << std::endl; // Optional debug
+}
+
+lsm_tree::~lsm_tree() {
+    shutdown_requested_.store(true); // Set atomic flag
+    flush_request_cv_.notify_one(); // Notify the flusher thread
+    // Perform final flush on shutdown
+
+    if (flusher_thread_.joinable()) {
+    flusher_thread_.join();
+
     // --- Wait for any pending background tasks ---
     // std::cout << "DEBUG: Waiting for background tasks..." << std::endl; // Debug
     for(auto& future : background_tasks_) {
@@ -570,7 +565,7 @@ lsm_tree::~lsm_tree() {
     }
     // Physical files remain unless cleanup_files is called separately before deletion.
     // std::cout << "DEBUG: LSM Tree shutdown complete." << std::endl; // Debug
-    
+    }
 }
 
 std::string lsm_tree::generate_sstable_filename(int level_num) {
@@ -1041,59 +1036,36 @@ if (newest_found_kv.has_value()) {
 // --- Public Interface Implementation ---
 // lsm_tree.cpp
 bool lsm_tree::insert(key_value kv_pair) {
-// Try inserting into memtable
-if (!memtable_ptr_->insert(kv_pair)) { // insert acquires memtable_mutex_
-// Memtable is full, need to flush it
-// std::cout << "Memtable full. Flushing to Level 1..." << std::endl; // Debug output
-// Flush the memtable (acquires memtable_mutex_) - This MUST be synchronous to free up memtable space immediately
-    std::vector<key_value> data_to_flush = memtable_ptr_->flush();
+    // Check if shutdown is requested before attempting insert
+    if (shutdown_requested_.load()) {
+        // std::cerr << "Warning: Insert attempted during shutdown." << std::endl; // Optional warning
+        return false; // Cannot insert during shutdown
+    }
 
-    if (!data_to_flush.empty()) {
-        // Generate a filename for the new run in Level 1 (acquires id_mutex_)
-        std::string new_sstable_file = generate_sstable_filename(1);
+    // Try inserting into memtable
+    bool trigger_flush = false;
+    // memtable::insert handles its own lock (memtable_mutex_) and updates cur_size_
+    memtable_ptr_->insert(kv_pair, trigger_flush);
 
-        // Launch the flush/write/add/merge check process in a background thread
-        // The lambda captures 'this', data_to_flush by move, and filename by value.
-        background_tasks_.push_back(std::async(std::launch::async,
-            [this, data_to_flush = std::move(data_to_flush), new_sstable_file]() mutable {
-                // Write the flushed data to the new SSTable file and get its info (including filter)
-                SSTableInfo new_run_info = write_sstable(data_to_flush, new_sstable_file, data_to_flush.size());
+    // Check if the insertion triggered the need for a flush
+    if (trigger_flush) {
+        // std::cout << "Memtable full (size=" << memtable_ptr_->cur_size_ << "). Signaling flusher thread..." << std::endl; // Debug output
 
-                if (!new_run_info.filename.empty()) { // Check if write was successful
-                    // Add the new run (info) to Level 1
-                    if (levels_.size() > 1 && levels_[1]) {
-                        std::lock_guard<std::mutex> l1_lock(levels_[1]->level_mutex_);
-                        levels_[1]->add_run(std::move(new_run_info)); // add_run assumes lock held
-                        // std::cerr << "DEBUG ASYNC FLUSH: Added new run " << new_run_info.filename << " to L1." << std::endl; // Debug
-                    } else {
-                    std::cerr << "Critical Error: Level 1 is null or levels_ vector too small in async flush task. Cannot add flushed run." << std::endl;
-                    // Data loss: file exists but isn't tracked.
-                    }
+        // Signal the background flusher thread
+        { // Scoped lock for the flush signal flag
+            std::lock_guard<std::mutex> lock(flush_mutex_);
+            flush_needed_ = true;
+        } // lock releases mutex
 
-                // Check if Level 1 needs merging now. This recursive call will handle subsequent merges
-                // and also launch them asynchronously.
-                check_and_trigger_merge(1);
+        // Notify the flusher thread's condition variable
+        flush_request_cv_.notify_one();
+    }
 
-            } else {
-                std::cerr << "Error: Failed to write flushed memtable to disk in async flush task. Data potentially lost." << std::endl;
-                 // File might exist but is incomplete, or might have been deleted by write_sstable on error.
-                 // No automatic cleanup of partially written file if write_sstable failed badly without deleting.
-            }
-        }) // <-- Closing parenthesis for std::async
-    ); // <-- Closing parenthesis and semicolon for push_back
-
-     } else {
-         // Memtable was full but flush yielded no data. This is unexpected, but not an error preventing insert.
-         std::cerr << "Warning: Memtable was full, but flush returned empty data." << std::endl;
-     }
-
-    // Memtable was full, but flushed. The original insert attempt failed.
-    return true; // Indicate success because data was accepted into the system via flush queue
+    // The insert is considered successful as the data is now in the memtable
+    // (or scheduled for flush if it triggered one).
+    return true;
 }
-// Insert successful (directly into memtable on first try)
-return true;
- 
-}
+
 // Public get function using the internal parallel search helper
 int lsm_tree::get(int key, std::ostream& os) {
     // Use the internal helper to get the key's value
@@ -1433,6 +1405,7 @@ void lsm_tree::printStats(std::ostream& os) const {
     os << "----------------------" << std::endl;
  
 }
+
 // Explicit function to delete all SSTable files and directories
 void lsm_tree::cleanup_files() {
     std::cout << "Cleaning up ALL SSTable files and directories..." << std::endl;
@@ -1481,16 +1454,6 @@ void lsm_tree::cleanup_files() {
 }
 // Public wrapper for load_file (loads a list of commands)
 void lsm_tree::load(const std::string& fileName) {
-    // Note: This function parses a file containing commands and calls the LSM tree
-    // methods. The parallelization discussed applies to 'get' and 'range' calls from
-    // this load function, not the parsing/loading itself.
-    // The implementation of this function is not provided in the original snippet,
-    // but the parallel get and range will be used when commands like GET or RANGE
-    // are encountered in the loaded file.
-    // If load_file was meant to load SSTables, it would need to handle filenames
-    // correctly and potentially rebuild the tree state, similar to the constructor.
-    // Assuming it's loading commands for now.
-    // Example basic implementation assuming command format like "PUT 1 10", "GET 1", "RANGE 1 5":
     std::ifstream infile(fileName);
     if (!infile) {
         std::cerr << "Error: Could not open load file: " << fileName << std::endl;
@@ -1532,6 +1495,76 @@ void lsm_tree::load(const std::string& fileName) {
             std::cerr << "Error processing command '" << command << "' on line " << lineNumber << " in " << fileName << ": " << e.what() << std::endl;
         } catch (...) {
             std::cerr << "Unknown error processing command '" << command << "' on line " << lineNumber << " in " << fileName << std::endl;
+        }
+    }
+}
+
+void lsm_tree::flushThreadLoop() {
+    // std::cout << "Flusher thread started." << std::endl; // Debug
+
+    while (true) {
+        // Wait for a flush request or shutdown signal
+        std::unique_lock<std::mutex> lock(flush_mutex_);
+        flush_request_cv_.wait(lock, [this]{
+            // Wait if shutdown is NOT requested AND flush is NOT needed
+            return shutdown_requested_.load() || flush_needed_;
+        });
+
+        // Check for shutdown request AFTER waking up
+        // If shutdown is requested AND there's no pending flush (flush_needed_ is false), exit the loop.
+        // If shutdown is requested *but* flush_needed_ is true, process the pending flush first.
+        if (shutdown_requested_.load() && !flush_needed_) {
+            // std::cout << "Flusher thread received shutdown signal and no pending flush. Exiting." << std::endl; // Debug
+            break; // Exit the thread loop
+        }
+
+        // If we woke up because flush_needed_ is true (or shutdown was requested and flush_needed_ was true)
+        if (flush_needed_) {
+             flush_needed_ = false; // Reset the flag *while holding the lock*
+
+            // Unlock the mutex while performing the potentially blocking I/O and other work
+            lock.unlock();
+            // std::cout << "Flusher thread woke up, performing flush..." << std::endl; // Debug
+
+            // --- Flush the memtable (Logic copied from original async lambda in insert) ---
+            // flush() acquires memtable_mutex_ internally
+            std::vector<key_value> data_to_flush = memtable_ptr_->flush();
+
+            if (!data_to_flush.empty()) {
+                // Generate a filename for the new run in Level 1 (acquires id_mutex_)
+                std::string new_sstable_file = generate_sstable_filename(1);
+
+                // Write the flushed data to the new SSTable file and get its info (including filter)
+                SSTableInfo new_run_info = write_sstable(data_to_flush, new_sstable_file, data_to_flush.size());
+
+                if (!new_run_info.filename.empty()) { // Check if write was successful
+                    // Add the new run (info) to Level 1
+                    if (levels_.size() > 1 && levels_[1]) {
+                        // Need to lock Level 1 to add the run
+                        std::lock_guard<std::mutex> l1_lock(levels_[1]->level_mutex_);
+                        levels_[1]->add_run(std::move(new_run_info)); // add_run assumes lock held
+                        // std::cerr << "DEBUG FLUSHER: Added new run " << levels_[1]->sstable_runs_.back().filename << " to L1." << std::endl; // Debug
+                    } else {
+                         std::cerr << "Critical Error: Level 1 is null or levels_ vector too small in flusher task. Cannot add flushed run." << std::endl;
+                         // Data loss: file exists but isn't tracked.
+                    }
+
+                    // Check if Level 1 needs merging now. This recursive call will handle subsequent merges
+                    // and also launch them asynchronously using background_tasks_.
+                    check_and_trigger_merge(1); // This function already handles launching async merge tasks
+
+                } else {
+                    std::cerr << "Error: Failed to write flushed memtable to disk in flusher task. Data potentially lost." << std::endl;
+                    // File might exist but is incomplete, or might have been deleted by write_sstable on error.
+                    // No automatic cleanup of partially written file if write_sstable failed badly without deleting.
+                }
+             } else {
+                 // Memtable was full, but flush returned empty data. This is unexpected, but handled.
+                 // std::cerr << "Warning: Memtable was full, but flush returned empty data in flusher thread." << std::endl;
+             }
+             // --- End Flush Logic ---
+
+             // Reacquire the lock before going back to wait (unique_lock handles this if not explicitly unlocked)
         }
     }
 }
