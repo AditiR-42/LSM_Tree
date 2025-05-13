@@ -1,128 +1,147 @@
-#include "lsm_tree.hh" // Include the LSM tree header
+// test_lsm.cpp
+#include "lsm_tree.hh" // Include your LSM tree header
 #include <iostream>
 #include <thread>
 #include <vector>
+#include <string>
 #include <chrono>
 #include <random>
-#include <map> // To verify state
-#include <set> // To track deleted keys
+#include <mutex>
+#include <atomic>
+#include <sstream>
 
-// Define constants from lsm_tree.hh if not included by it
-// (Better to ensure lsm_tree.hh defines/includes necessary constants)
-// #define MEMTABLE_CAPACITY 10
-// #define INITIAL_LEVEL_CAPACITY 2
-// #define SIZE_RATIO 4
-// #define MAX_LEVELS 3
-// const int BLOCK_SIZE = 100; // Approximate block size in bytes
-// const std::string SST_FILE_PREFIX = "run_";
-// const std::string SST_FILE_SUFFIX = ".sst";
-// const double BLOOM_FILTER_FALSE_POSITIVE_RATE = 0.01;
-// const size_t BLOOM_FILTER_ESTIMATED_N_FLUSH = MEMTABLE_CAPACITY; // Estimated keys in a flush
-// const size_t BLOOM_FILTER_ESTIMATED_N_MERGE = 100; // Heuristic for merged runs
+// Use a mutex for controlling access to std::cout from multiple threads
+std::mutex cout_mutex;
 
-// Define test parameters
-const int NUM_THREADS = 5;
-const int OPS_PER_THREAD = 500;
-const int KEY_RANGE_START = 1000;
-const int KEY_RANGE_END = KEY_RANGE_START + NUM_THREADS * 200; // Overlapping key ranges
+// Writer thread function
+void writer_task(lsm_tree* tree, int start_key, int num_keys_to_insert, std::atomic<int>& inserts_completed) {
+    // std::cerr << "DEBUG: Writer thread started, inserting " << num_keys_to_insert << " keys starting from " << start_key << std::endl; // Debug
+    for (int i = 0; i < num_keys_to_insert; ++i) {
+        int key = start_key + i;
+        int value = key * 100; // Simple value relation
+        key_value kv(key, value, false);
 
-// --- Worker Thread Function ---
-void worker_thread(lsm_tree* tree, int thread_id, int start_key, int end_key, int num_ops) {
-    std::mt19937 rng(std::chrono::steady_clock::now().time_since_epoch().count() + thread_id);
-    std::uniform_int_distribution<int> key_dist(start_key, end_key);
-    std::uniform_int_distribution<int> op_dist(0, 100); // 0-50: Insert/Update, 51-70: Delete, 71-100: Get
-
-    std::cout << "Thread " << thread_id << " starting operations in key range [" << start_key << ", " << end_key << "]" << std::endl;
-
-    for (int i = 0; i < num_ops; ++i) {
-        int key = key_dist(rng);
-        int op_type = op_dist(rng);
-
-        try {
-            if (op_type <= 50) { // Insert/Update
-                int value = thread_id * 1000 + key; // Value includes thread ID for tracking
-                tree->insert({key, value, false});
-                // std::cout << "Thread " << thread_id << ": Inserted/Updated key " << key << " with value " << value << std::endl; // Too verbose
-            } else if (op_type <= 70) { // Delete
-                tree->delete_key(key);
-                // std::cout << "Thread " << thread_id << ": Deleted key " << key << std::endl; // Too verbose
-            } else { // Get
-                // Note: Get prints to cout in your current get implementation
-                // For concurrent testing, it's better to capture output or modify get
-                // For this simple test, we'll just call get and rely on printStats for verification
-                tree->get(key, std::cout); // Output to cout, not range mode
-                // Consider making `get` return a struct or optional<pair<int, bool>>
-                // rather than printing, for easier test verification.
-            }
-        } catch (const std::exception& e) {
-            std::cerr << "Thread " << thread_id << " ERROR: " << e.what() << std::endl;
-        } catch (...) {
-            std::cerr << "Thread " << thread_id << " ERROR: Unknown exception." << std::endl;
+        // The insert call will be synchronous until memtable is full,
+        // then it will launch an async flush and immediately return.
+        // This is exactly what we want to test concurrency against.
+        if (tree->insert(kv)) {
+            inserts_completed++;
+            // std::lock_guard<std::mutex> lock(cout_mutex);
+            // std::cout << "Writer: Inserted " << key << std::endl;
+        } else {
+             // This else block should ideally not be hit with the async flush logic.
+             // If insert returns false after async flush is launched, it indicates
+             // a problem with freeing memtable space or immediate retry logic.
+            std::lock_guard<std::mutex> lock(cout_mutex);
+            std::cerr << "Writer: Failed to insert key " << key << " even after flush attempt." << std::endl;
         }
 
-        // Small sleep to potentially increase context switching
-        // std::this_thread::sleep_for(std::chrono::microseconds(10)); // Optional: can make races more likely
+        // Add a small delay to simulate real-world operations and avoid pegging CPU
+        // std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-
-    std::cout << "Thread " << thread_id << " finished." << std::endl;
+    // std::cerr << "DEBUG: Writer thread finished." << std::endl; // Debug
 }
 
+// Reader thread function
+void reader_task(lsm_tree* tree, int key_range_start, int key_range_end, std::atomic<int>& gets_completed) {
+    std::mt19937 rng(std::chrono::steady_clock::now().time_since_epoch().count()); // Seed random number generator
+    std::uniform_int_distribution<int> dist(key_range_start, key_range_end); // Distribution within the key range
+
+    // std::cerr << "DEBUG: Reader thread started, querying keys between " << key_range_start << " and " << key_range_end << std::endl; // Debug
+
+    auto start_time = std::chrono::high_resolution_clock::now();
+    const auto run_duration = std::chrono::seconds(10); // Run reader for 10 seconds
+
+    while (std::chrono::high_resolution_clock::now() - start_time < run_duration) {
+        int key_to_get = dist(rng); // Get a random key within the range
+
+        // Use a temporary stringstream to capture output to avoid locking cout for too long
+        std::stringstream ss;
+        ss << "Reader: Getting key " << key_to_get << " -> ";
+
+        // The get call performs parallel search across levels
+        // This tests if search is responsive while flushes/merges happen
+        int value = tree->get(key_to_get, ss); // get function locks cout_mutex internally
+
+        ss << "Value: " << (value != -1 ? std::to_string(value) : "Not Found") << std::endl;
+
+        {
+            std::lock_guard<std::mutex> lock(cout_mutex);
+            std::cout << ss.str(); // Print captured output
+        }
+
+        gets_completed++;
+
+        // Small delay
+        // std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+     // std::cerr << "DEBUG: Reader thread finished." << std::endl; // Debug
+}
+
+
 int main() {
-    std::cout << "LSM Tree Concurrency Test" << std::endl;
+    std::cout << "Starting LSM Tree Concurrency Test" << std::endl;
 
-    // Clean up any previous test data
-    lsm_tree cleanup_tree; // Create a temporary tree just for cleanup
-    cleanup_tree.cleanup_files();
-    // The temporary cleanup_tree goes out of scope and is destroyed
-
-    // Create the main LSM tree instance
-    lsm_tree db;
-
-    // Create and launch worker threads
-    std::vector<std::thread> threads;
-    for (int i = 0; i < NUM_THREADS; ++i) {
-        int start_key = KEY_RANGE_START + i * 100; // Overlapping ranges
-        int end_key = start_key + 150;
-        threads.emplace_back(worker_thread, &db, i + 1, start_key, end_key, OPS_PER_THREAD);
+    // Ensure the data directory is clean before starting
+    // Note: If you are using `cleanup_files` in the destructor, this might be redundant,
+    // but explicit cleanup is good for tests.
+    {
+         lsm_tree temp_tree; // Create a temporary instance just to call cleanup
+         temp_tree.cleanup_files(); // Deletes existing files
     }
 
-    // Wait for all threads to complete
-    for (auto& t : threads) {
-        t.join();
-    }
 
-    std::cout << "\nAll threads finished. Performing final verification." << std::endl;
+    lsm_tree tree; // The main LSM tree instance
 
-    // --- Verification ---
-    // The most reliable verification for concurrent writes is to check the final state.
-    // We can do this by iterating through the expected key range and using get().
-    // However, your get function prints directly.
-    // A simpler verification is to print stats and spot-check.
+    const int total_keys_to_insert = 200; // Enough to trigger multiple flushes (MEMTABLE_CAPACITY=50 -> 4 flushes)
+    const int writer_key_start = 1000;
+    const int reader_key_range_start = 1000;
+    const int reader_key_range_end = writer_key_start + total_keys_to_insert - 1; // Reader queries within the writer's range
 
-    std::cout << "\n--- Final LSM Tree State ---" << std::endl;
-    db.printStats(std::cout);
-    std::cout << "--------------------------" << std::endl;
+    std::atomic<int> inserts_completed(0);
+    std::atomic<int> gets_completed(0);
 
-    // Basic spot checks using get
-    std::cout << "\n--- Spot Checks ---" << std::endl;
-    for (int key = KEY_RANGE_START; key <= KEY_RANGE_END; ++key) {
-       // Check a few keys across the range
-       if (key % 50 == 0) {
-           std::cout << "Checking key " << key << ": ";
-           db.get(key, std::cout); // get prints value or newline
-       }
-    }
-    std::cout << "-------------------" << std::endl;
 
-    // A more rigorous check would track the expected final state based on timestamps
-    // or a logical sequence of operations, but that's complex.
-    // For this simple test, we rely on printStats showing a consistent logical count
-    // and spot checks not crashing or showing obvious garbage.
+    std::cout << "Launching writer thread..." << std::endl;
+    std::thread writer_t(writer_task, &tree, writer_key_start, total_keys_to_insert, std::ref(inserts_completed));
 
-    std::cout << "\nTest complete." << std::endl;
+    // Give the writer a moment to start inserting some data before readers begin
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    // The `db` object is destroyed when main exits, triggering the destructor.
-    // cleanup_files() was called at the start for a clean state.
+    std::cout << "Launching reader thread..." << std::endl;
+    std::thread reader_t(reader_task, &tree, reader_key_range_start, reader_key_range_end, std::ref(gets_completed));
+
+    // You could add more reader/writer/deleter threads here if desired
+
+    // Wait for threads to complete
+    writer_t.join();
+    reader_t.join(); // Reader runs for a fixed duration
+
+    std::cout << "\nAll test threads finished." << std::endl;
+    std::cout << "Total inserts attempted by writer: " << total_keys_to_insert << std::endl;
+    std::cout << "Total inserts completed (reported by writer): " << inserts_completed << std::endl; // Should match total_keys_to_insert if memtable accepts them
+    std::cout << "Total get operations attempted by reader: " << gets_completed << std::endl;
+
+
+    // Wait a bit longer for any *remaining* background flush/merge tasks to complete
+    // This is important because `check_and_trigger_merge` might launch subsequent merges
+    // *after* the threads join. The destructor *will* wait, but an explicit wait here
+    // before printing final stats might be helpful if you want to see the tree's state
+    // *after* all known merges triggered by the test have finished.
+    std::cout << "Waiting for final background tasks (e.g., merges) to complete..." << std::endl;
+    // A heuristic wait time, or add a mechanism to track *all* async tasks
+    // The destructor handles the proper waiting via background_tasks_ vector.
+    // std::this_thread::sleep_for(std::chrono::seconds(5)); // Optional manual wait
+
+
+    std::cout << "\nFinal LSM Tree Stats:" << std::endl;
+    tree.printStats(std::cout); // printStats locks cout_mutex internally
+
+    std::cout << "Test finished." << std::endl;
+
+    // The LSM tree destructor will implicitly wait for background_tasks_ and then delete files.
+    // If you prefer explicit cleanup via the command handler, you could call `tree.cleanup_files()` here
+    // instead of using the temporary tree at the start.
 
     return 0;
 }

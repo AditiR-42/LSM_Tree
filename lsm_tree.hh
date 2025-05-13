@@ -17,7 +17,7 @@
 #include "bloom_filter.hh"
 
 // --- Constants ---
-const int MEMTABLE_CAPACITY = 50;
+const int MEMTABLE_CAPACITY = 100;
 const int INITIAL_LEVEL_CAPACITY = 10; // Capacity logic is less strict with tiering/runs
 const int SIZE_RATIO = 5; // Number of runs allowed in a level before merging
 const int MAX_LEVELS = 10;
@@ -128,6 +128,7 @@ private:
     std::mutex id_mutex_;
     mutable std::mutex cout_mutex_; // Use mutable because printing from const methods needs lock
     std::mutex file_delete_mutex_;
+    std::vector<std::future<void>> background_tasks_;
 
     // Helper to generate unique SSTable filenames
     std::string generate_sstable_filename(int level_num);
