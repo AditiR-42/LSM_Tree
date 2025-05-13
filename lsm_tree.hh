@@ -12,6 +12,7 @@
 #include <future>   // For std::future, std::async
 #include <tuple>    // For std::tuple
 #include <optional> // For std::optional
+#include <map>
 
 #include "bloom_filter.hh"
 
@@ -100,16 +101,17 @@ public:
 // --- Memtable Class ---
 class memtable {
 public:
-    std::vector<key_value> memtable_;
+    std::map<int, key_value> memtable_;
     int capacity_ = MEMTABLE_CAPACITY;
-    int curr_size_ = 0;
     std::mutex memtable_mutex_;
 
     memtable();
 
     bool insert(key_value kv_pair);
 
-    bool is_full() const { return curr_size_ >= capacity_; }
+    bool is_full() const {
+        return memtable_.size() >= static_cast<decltype(memtable_)::size_type>(capacity_);
+    }
 
     std::vector<key_value> flush();
 

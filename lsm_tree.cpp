@@ -340,49 +340,56 @@ void level::clear_runs() {
 
 // --- Memtable Class Implementation ---
 memtable::memtable() {
-    memtable_.reserve(MEMTABLE_CAPACITY);
 }
 
 bool memtable::insert(key_value kv_pair) {
     std::lock_guard<std::mutex> lock(memtable_mutex_);
-    for (int i = 0; i < curr_size_; ++i) {
-        if (memtable_[i].key == kv_pair.key) {
-            memtable_[i].value = kv_pair.value;
-            memtable_[i].tombstone = kv_pair.tombstone;
-            return true;
-        }
+
+    // Map handles updates automatically. Check if full *before* insertion.
+    // Check if key exists to see if it's an update or a new insert for capacity check
+    bool is_update = memtable_.count(kv_pair.key) > 0;
+
+    if (!is_update && is_full()) {
+        return false; // Cannot insert new key if full
     }
 
-    if (is_full()) {
-       return false;
-    }
+    // Insert or update the key. Map handles existing keys by replacement.
+    memtable_[kv_pair.key] = kv_pair;
 
-    memtable_.push_back(kv_pair);
-    ++curr_size_;
     return true;
 }
 
 std::vector<key_value> memtable::flush() {
     std::lock_guard<std::mutex> lock(memtable_mutex_);
-    std::sort(memtable_.begin(), memtable_.end());
-    std::vector<key_value> data_to_flush = memtable_;
+
+    // Copy elements from the map to a vector
+    std::vector<key_value> data_to_flush;
+    data_to_flush.reserve(memtable_.size()); // Reserve space based on map size
+    for(const auto& pair : memtable_) {
+        data_to_flush.push_back(pair.second); // Map stores pair<key, value>
+    }
+
+    // Clear the map
     memtable_.clear();
-    memtable_.reserve(MEMTABLE_CAPACITY);
-    curr_size_ = 0;
+
     return data_to_flush;
 }
 
 bool memtable::find_key(int key, int& value, bool& is_tombstone) {
     std::lock_guard<std::mutex> lock(memtable_mutex_);
-    // Search in reverse order (newest entries added last)
-    for (int i = curr_size_ - 1; i >= 0; --i) {
-        if (memtable_[i].key == key) {
-            value = memtable_[i].value;
-            is_tombstone = memtable_[i].tombstone;
-            return true;
-        }
+
+    // Use map::find to locate the key
+    auto it = memtable_.find(key);
+
+    if (it != memtable_.end()) {
+        // Key found in map
+        const key_value& kv = it->second; // Map iterator points to pair<key, value>
+        value = kv.value;
+        is_tombstone = kv.tombstone;
+        return true;
     }
-    return false;
+
+    return false; // Key not found in map
 }
 
 // --- LSM_Tree Class Implementation ---
@@ -508,7 +515,7 @@ lsm_tree::lsm_tree() : next_run_id_(0) {
 lsm_tree::~lsm_tree() {
     // Perform final flush on shutdown
     // std::cout << "DEBUG: Shutting down LSM Tree..." << std::endl; // Debug
-    if (memtable_ptr_ && memtable_ptr_->curr_size_ > 0) {
+    if (memtable_ptr_ && !memtable_ptr_->memtable_.empty()) {
         // std::cout << "DEBUG: Final memtable flush..." << std::endl; // Debug
         std::vector<key_value> data_to_flush = memtable_ptr_->flush(); // flush acquires memtable lock
         if (!data_to_flush.empty()) {
@@ -1075,10 +1082,11 @@ void lsm_tree::printStats(std::ostream& os) const {
     // 1.a Process Memtable
     {
         std::lock_guard<std::mutex> memtable_lock(memtable_ptr_->memtable_mutex_);
-        for (int i = memtable_ptr_->curr_size_ - 1; i >= 0; --i) { // Iterate reverse for latest memtable entries first
-            const auto& kv = memtable_ptr_->memtable_[i];
+        for (const auto& pair : memtable_ptr_->memtable_) { // Iterate through map pairs (key, key_value)
+            const auto& kv = pair.second; // Get the key_value struct
 
-            // If key already processed (found newer version or deleted), skip
+            // If key already processed (found newer version in map itself or already marked deleted in map processing), skip
+            // This check is slightly redundant with map logic but harmless.
             if (logical_data.count(kv.key) || deleted_keys.count(kv.key)) {
                 continue;
             }
