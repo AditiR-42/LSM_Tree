@@ -25,8 +25,9 @@
 #include <optional>
 
 using namespace std;
-// --- Define data directory constant ---
+
 const std::string DATA_DIR = "data";
+
 // --- Helper Functions ---
 bool directory_exists(const std::string& path) {
     struct stat info;
@@ -53,29 +54,27 @@ SSTableInfo lsm_tree::rebuild_run_info(const std::string& filename) {
     std::ifstream infile(filename);
     if (!infile) {
         std::cerr << "Warning: Could not open SSTable TXT file to rebuild run info: " << filename << std::endl;
-        return {}; // Return default-constructed (invalid) SSTableInfo
+        return {};
     }
 
-    SSTableInfo run_info; // Use default constructor
+    SSTableInfo run_info; 
     run_info.filename = filename;
-    // Filter will be built after collecting keys
 
     long long current_block_byte_count = 0;
-    std::vector<int> keys_in_file; // To collect keys for Bloom Filter and count
+    std::vector<int> keys_in_file;
     int file_min_key = std::numeric_limits<int>::max();
     int file_max_key = std::numeric_limits<int>::min();
     bool found_any_key = false;
 
     // First pass: Collect keys, build fence pointers, find min/max keys
-    infile.clear(); // Clear EOF flags etc.
-    infile.seekg(0, std::ios::beg); // Rewind to the start
+    infile.clear();
+    infile.seekg(0, std::ios::beg); 
 
     while (true) {
         long long line_start_offset = infile.tellg();
 
         if (line_start_offset == -1 && !infile.eof()) { // check !infile.eof() otherwise tellg() at eof might be -1
              std::cerr << "Warning: tellg() failed during run info rebuild pass 1 in " << filename << std::endl;
-             // Continue loop, but fence pointers using this offset will be bad
         }
 
         std::string current_line;
@@ -83,7 +82,7 @@ SSTableInfo lsm_tree::rebuild_run_info(const std::string& filename) {
             if (!infile.eof() && infile.fail()) {
                  std::cerr << "Warning: Read error during run info rebuild pass 1 in " << filename << std::endl;
             }
-            break; // Exit loop on EOF or read error
+            break; 
         }
 
         if (current_line.empty()) {
@@ -91,7 +90,7 @@ SSTableInfo lsm_tree::rebuild_run_info(const std::string& filename) {
              if (line_start_offset != -1 && infile.tellg() != -1) {
                  current_block_byte_count += (infile.tellg() - line_start_offset);
              } else {
-                 current_block_byte_count += 1; // Estimate newline size
+                 current_block_byte_count += 1; 
              }
             continue;
         }
@@ -110,15 +109,14 @@ SSTableInfo lsm_tree::rebuild_run_info(const std::string& filename) {
              if (line_end_offset != -1 && line_start_offset != -1) {
                  line_byte_size = line_end_offset - line_start_offset;
              } else if (line_end_offset == -1) {
-                  line_byte_size = current_line.length() + 1; // +1 for newline (rough estimate)
+                  line_byte_size = current_line.length() + 1;
              }
 
              if (current_block_byte_count >= BLOCK_SIZE || fence_pointers.empty()) {
                  if (line_start_offset != -1) {
                     fence_pointers.push_back({current_key, line_start_offset});
                  } else {
-                     // Fallback if tellg failed at the start of the line
-                      fence_pointers.push_back({current_key, 0}); // Add with offset 0 as a fallback
+                      fence_pointers.push_back({current_key, 0});
                       std::cerr << "Warning: Using fallback offset 0 for fence pointer in " << filename << " due to tellg failure." << std::endl;
                  }
                  current_block_byte_count = line_byte_size;
@@ -133,11 +131,11 @@ SSTableInfo lsm_tree::rebuild_run_info(const std::string& filename) {
              if (line_end_offset != -1 && line_start_offset != -1) {
                  line_byte_size = line_end_offset - line_start_offset;
              } else if (line_end_offset == -1) {
-                  line_byte_size = current_line.length() + 1; // +1 for newline (rough estimate)
+                  line_byte_size = current_line.length() + 1; 
              }
              current_block_byte_count += line_byte_size;
         }
-    } // End while(true) loop pass 1
+    } 
 
     infile.close();
 
@@ -146,11 +144,9 @@ SSTableInfo lsm_tree::rebuild_run_info(const std::string& filename) {
         run_info.min_key = file_min_key;
         run_info.max_key = file_max_key;
     } else {
-         // If no keys were found, this file is effectively empty.
-         // Set a range that doesn't overlap with anything or indicate empty.
          run_info.min_key = std::numeric_limits<int>::max();
          run_info.max_key = std::numeric_limits<int>::min();
-         run_info.fence_pointers.clear(); // No keys, no valid fence pointers
+         run_info.fence_pointers.clear(); 
     }
 
     // Now initialize Bloom Filter with the actual count of keys found
@@ -160,8 +156,7 @@ SSTableInfo lsm_tree::rebuild_run_info(const std::string& filename) {
     std::ifstream infile_pass2(filename);
     if (!infile_pass2) {
          std::cerr << "Error: Could not re-open SSTable TXT file for rebuild pass 2: " << filename << std::endl;
-         // Return SSTableInfo with collected fence pointers and min/max, but potentially empty filter
-         return run_info; // Return the partially filled info
+         return run_info; 
     }
 
     std::string line_pass2;
@@ -191,13 +186,14 @@ SSTableInfo lsm_tree::rebuild_run_info(const std::string& filename) {
          std::cerr << "Warning: Key count mismatch during rebuild for " << filename << ". Pass 1 found " << keys_in_file.size() << ", Pass 2 added " << keys_added_to_filter << " to filter." << std::endl;
     }
 
-    return run_info; // Return the successfully created SSTableInfo
+    return run_info; 
 }
 
 // --- Helper Struct for Merge ---
 struct merge_entry {
 key_value kv;
 size_t stream_index; // Which input file this entry came from
+
 // Custom comparator for min-heap (priority queue) based on key
 bool operator>(const merge_entry& other) const {
     if (kv.key > other.kv.key) {
@@ -207,141 +203,126 @@ bool operator>(const merge_entry& other) const {
         return false;
     }
     // For same key, prioritize smaller stream_index (older run) so the newest version (from largest stream_index among duplicates) is processed last among the duplicates.
-    // This ensures min_heap.top() for a given key is always the newest version.
-    return stream_index < other.stream_index; // Newest run index is larger
+    return stream_index < other.stream_index; 
 }
  
 };
 // --- Level Class Implementation ---
 level::level(int capacity, int curr_level) : capacity_(capacity), curr_level_(curr_level) {
-// sstable_runs_ is already default-initialized (empty vector)
 }
 level::~level() {
-// SSTableInfo vector member sstable_runs_ will be destroyed automatically.
-// Its contained BloomFilter objects will also be destroyed automatically.
-// The files themselves are NOT deleted here.
 }
+
 // Assumes caller holds level_mutex_
 void level::add_run(SSTableInfo&& info) {
-// std::cerr << "DEBUG ADD_RUN L" << curr_level_ << ": Adding run " << info.filename << std::endl; // Debug
-sstable_runs_.push_back(std::move(info));
-// runs are added oldest-first by the constructor loading and merge_runs logic.
-// find_key searches rbegin() (newest first).
+    sstable_runs_.push_back(std::move(info));
 }
-// Assumes caller holds level_mutex_ before calling
+
+// Assumes caller holds level_mutex_ 
 // Search key in this level's SSTables (files) using Bloom filters and fence pointers
 bool level::find_key(int key, int& value, bool& is_tombstone) const {
-// Iterate through runs in reverse order (newest first)
-for (auto it = sstable_runs_.rbegin(); it != sstable_runs_.rend(); ++it) {
-    const SSTableInfo& run_info = *it;
-    const std::string& filename = run_info.filename;
-    const auto& fence_pointers = run_info.fence_pointers;
-    const auto& filter = run_info.filter;
-    // --- Bloom Filter Check ---
-    if (!filter.contains(key)) {
-        continue; // Key definitely not in this file, skip reading it
-    }
-    // --- End Bloom Filter Check ---
+    // Iterate through runs in reverse order (newest first)
+    for (auto it = sstable_runs_.rbegin(); it != sstable_runs_.rend(); ++it) {
+        const SSTableInfo& run_info = *it;
+        const std::string& filename = run_info.filename;
+        const auto& fence_pointers = run_info.fence_pointers;
+        const auto& filter = run_info.filter;
 
-    // --- Use Fence Pointers to find potential block ---
-    long long search_offset = 0;
-
-    if (!fence_pointers.empty()) {
-        auto fp_it = std::lower_bound(fence_pointers.begin(), fence_pointers.end(), key,
-                                     [](const std::pair<int, long long>& fp, int target_key){
-                                         return fp.first < target_key;
-                                     });
-
-        if (fp_it != fence_pointers.begin()) {
-            --fp_it;
-            search_offset = fp_it->second;
-        } else {
-             // Key is <= the first fence pointer's key. Search from the beginning (offset 0).
-             // The first fence pointer's offset should typically be 0 anyway, but handle explicitly.
-             search_offset = 0;
+        // Bloom Filter Check
+        if (!filter.contains(key)) {
+            continue; 
         }
-    } else {
-         search_offset = 0; // No fence pointers, must search from start
-    }
-    // --- End Fence Pointer Logic ---
 
+        // Use fence pointers to find potential block
+        long long search_offset = 0;
 
-    // Open the file and seek to the calculated offset
-    std::ifstream infile(filename);
-    if (!infile) {
-        std::cerr << "Warning: Could not open SSTable TXT file for reading in find_key: " << filename << std::endl;
-        continue;
-    }
+        if (!fence_pointers.empty()) {
+            auto fp_it = std::lower_bound(fence_pointers.begin(), fence_pointers.end(), key,
+                                        [](const std::pair<int, long long>& fp, int target_key){
+                                            return fp.first < target_key;
+                                        });
 
-    // Basic check for negative or out-of-bounds offset
-     if (search_offset < 0) search_offset = 0; // Should not happen with tellg >= 0
-
-    infile.seekg(search_offset);
-    if (infile.fail()) {
-        std::cerr << "Warning: Failed to seek to offset " << search_offset << " in file " << filename << " during find_key. Skipping file." << std::endl;
-        infile.close();
-        continue;
-    }
-
-    std::string line;
-    int current_key;
-    int current_value;
-    int tombstone_flag;
-
-    // Read line by line from the seeked position
-    while (std::getline(infile, line)) {
-        if (line.empty()) continue;
-
-        std::stringstream ss(line);
-
-        if (ss >> current_key >> current_value >> tombstone_flag) {
-            if (current_key == key) {
-                value = current_value;
-                is_tombstone = (tombstone_flag == 1);
-                infile.close();
-                return true; // Found the key in the newest relevant file
+            if (fp_it != fence_pointers.begin()) {
+                --fp_it;
+                search_offset = fp_it->second;
+            } else {
+                // Key is <= the first fence pointer's key. Search from the beginning (offset 0).
+                search_offset = 0;
             }
-             // Optimization: If we passed the target key, it means the key isn't in this block or later in this file.
-             if (current_key > key) {
-                 break; // Key cannot be found further in this file (sorted)
-             }
         } else {
-             std::cerr << "Warning: Parsing error during find_key in file: " << filename << ", line: " << line << std::endl;
+            search_offset = 0; 
         }
+
+        // End Fence Pointer Logic
+        // Open the file and seek to the calculated offset
+        std::ifstream infile(filename);
+        if (!infile) {
+            std::cerr << "Warning: Could not open SSTable TXT file for reading in find_key: " << filename << std::endl;
+            continue;
+        }
+
+        if (search_offset < 0) search_offset = 0; 
+
+        infile.seekg(search_offset);
+        if (infile.fail()) {
+            std::cerr << "Warning: Failed to seek to offset " << search_offset << " in file " << filename << " during find_key. Skipping file." << std::endl;
+            infile.close();
+            continue;
+        }
+
+        std::string line;
+        int current_key;
+        int current_value;
+        int tombstone_flag;
+
+        // Read line by line from the seeked position
+        while (std::getline(infile, line)) {
+            if (line.empty()) continue;
+
+            std::stringstream ss(line);
+
+            if (ss >> current_key >> current_value >> tombstone_flag) {
+                if (current_key == key) {
+                    value = current_value;
+                    is_tombstone = (tombstone_flag == 1);
+                    infile.close();
+                    return true; 
+                }
+                // If we passed the target key, it means the key isn't in this block or later in this file.
+                if (current_key > key) {
+                    break;
+                }
+            } else {
+                std::cerr << "Warning: Parsing error during find_key in file: " << filename << ", line: " << line << std::endl;
+            }
+        }
+
+        if (!infile.eof() && infile.fail()) {
+            std::cerr << "Warning: Read error or parsing issue near EOF in SSTable TXT file: " << filename << " during find_key." << std::endl;
+        }
+
+        infile.close();
+
     }
 
-    if (!infile.eof() && infile.fail()) {
-         std::cerr << "Warning: Read error or parsing issue near EOF in SSTable TXT file: " << filename << " during find_key." << std::endl;
-    }
-
-    infile.close();
-
+    return false;
+    
 }
 
-return false; // Key not found in any run in this level
- 
-}
-// Helper specifically for parallel search to return optional<tuple<...>>
+// Helper for parallel search to return optional<tuple<...>>
 // Acquires and releases its own lock internally.
 std::optional<std::tuple<int, int, bool, int>> level::find_key_parallel(int key) const {
-// Acquire the level's lock for searching its runs
-std::lock_guard<std::mutex> lock(level_mutex_); // Mutex lock within the parallel task
-int value;
-bool is_tombstone;
-// Use the existing find_key logic (which assumes lock held)
-if (find_key(key, value, is_tombstone)) {
-    // Found the key in *some* run in *this* level.
-    // This level provides the newest version found *among its own runs*
-    // because level::find_key iterates runs newest-first.
-    return std::make_optional(std::make_tuple(key, value, is_tombstone, curr_level_));
+    std::lock_guard<std::mutex> lock(level_mutex_);
+    int value;
+    bool is_tombstone;
+    if (find_key(key, value, is_tombstone)) {
+        return std::make_optional(std::make_tuple(key, value, is_tombstone, curr_level_));
+    }
+    return std::nullopt;
 }
-return std::nullopt; // Key not found in this level
- 
-}
-// ********** MISSING DEFINITION ADDED **********
+
 // Assumes caller holds level_mutex_
 std::vector<std::string> level::get_run_filenames() const {
-    // Caller holds lock
     std::vector<std::string> filenames;
     filenames.reserve(sstable_runs_.size());
     for(const auto& info : sstable_runs_) {
@@ -352,8 +333,7 @@ std::vector<std::string> level::get_run_filenames() const {
 
 // Assumes caller holds level_mutex_
 void level::clear_runs() {
-    // Caller holds lock
-    sstable_runs_.clear(); // Clears the vector, destroying SSTableInfo objects and their filters
+    sstable_runs_.clear();
 }
 
 // --- Memtable Class Implementation ---
@@ -361,7 +341,6 @@ memtable::memtable(size_t capacity) : capacity_(capacity), cur_size_(0) {
 }
 
 memtable::memtable() : capacity_(MEMTABLE_CAPACITY), cur_size_(0) {
-     // memtable_ is default-initialized
 }
 
 void memtable::insert(key_value kv_pair, bool& trigger_flush) {

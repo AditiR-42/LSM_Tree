@@ -8,7 +8,6 @@ BloomFilter::BloomFilter(size_t estimated_elements, double false_positive_rate) 
     if (estimated_elements == 0 || false_positive_rate <= 0.0 || false_positive_rate >= 1.0) {
         m_ = 0;
         k_ = 0;
-        // bit_array_ is already empty
         return;
     }
 
