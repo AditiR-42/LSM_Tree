@@ -637,7 +637,6 @@ void lsm_tree::delete_sst_files(const std::vector<std::string>& filenames) {
                 std::cerr << "ERROR DELETE: Could not delete SSTable file: " << filename << " (" << strerror(errno) << ")" << std::endl;
             } else {
             }
-        } else {
         }
     }
 }
@@ -797,171 +796,142 @@ SSTableInfo lsm_tree::merge_runs(int target_level_num, const std::vector<SSTable
 
 // Check and trigger merges starting from a level
 void lsm_tree::check_and_trigger_merge(int level_num) {
-if (level_num < 1 || level_num > MAX_LEVELS) {
-return;
-}
-level* current_level = levels_[level_num];
-// Target level can be MAX_LEVELS even if source is MAX_LEVELS
-int target_level_num = std::min(level_num + 1, MAX_LEVELS);
-level* target_level = levels_[target_level_num]; // Keep target_level pointer for safety in lambda
-
-if (!target_level) {
-    std::cerr << "Critical Error: Target level " << target_level_num << " for merge from L" << level_num << " is unexpectedly null. Cannot merge." << std::endl;
-    return;
-}
-
-// --- Phase 1: Determine merge needs, identify files, clear source level ---
-std::vector<SSTableInfo> runs_to_merge_info;
-std::vector<std::string> files_to_delete;
-
-{ // Scoped lock for the current (source) level
-    std::lock_guard<std::mutex> current_level_lock(current_level->level_mutex_);
-
-    // Check merge condition *while holding the lock*
-    if (current_level->sstable_runs_.size() < SIZE_RATIO) {
-        return; // Locks automatically released, no merge needed
+    if (level_num < 1 || level_num > MAX_LEVELS) {
+        return;
     }
 
-    // Copy runs to merge info and filenames while holding the lock
-    runs_to_merge_info.reserve(current_level->sstable_runs_.size());
-    files_to_delete.reserve(current_level->sstable_runs_.size());
-    for(const auto& info : current_level->sstable_runs_) {
-        runs_to_merge_info.push_back(info);
-        files_to_delete.push_back(info.filename);
+    level* current_level = levels_[level_num];
+    int target_level_num = std::min(level_num + 1, MAX_LEVELS);
+    level* target_level = levels_[target_level_num];
+
+    if (!target_level) {
+        std::cerr << "Critical Error: Target level " << target_level_num << " for merge from L" << level_num << " is unexpectedly null. Cannot merge." << std::endl;
+        return;
     }
 
-    // Clear the runs from the current level *now* while the lock is held.
-    // This makes the runs immediately disappear from this level's search path in memory.
-    current_level->clear_runs(); // Now calls the added definition
-    // std::cerr << "DEBUG MERGE: Cleared " << files_to_delete.size() << " runs from L" << level_num << " for merge." << std::endl; // Debug
+    // --- Phase 1: Determine merge needs, identify files, clear source level ---
+    std::vector<SSTableInfo> runs_to_merge_info;
+    std::vector<std::string> files_to_delete;
 
-} // current_level_lock releases mutex. Files are still on disk at this point.
+    { // Scoped lock for the current (source) level
+        std::lock_guard<std::mutex> current_level_lock(current_level->level_mutex_);
 
-// --- Phase 2: Launch the merge process (File I/O, adding to target, deleting old) asynchronously ---
-// Using SIZE_RATIO * MEMTABLE_CAPACITY as a heuristic for merged run size estimate.
-size_t estimated_n = BLOOM_FILTER_ESTIMATED_N_MERGE; // Use constant as defined
-
-// Capture necessary variables by value or const reference for the async lambda
-background_tasks_.push_back(std::async(std::launch::async,
-    [this, level_num, target_level_num, runs_to_merge_info = std::move(runs_to_merge_info), files_to_delete = std::move(files_to_delete), estimated_n]() mutable {
-    // Capture level_num here ^^
-
-    // std::cerr << "DEBUG ASYNC MERGE: Starting merge task for level " << target_level_num << "..." << std::endl; // Debug
-
-    // Perform the merge (File I/O)
-    SSTableInfo merged_run_info = merge_runs(target_level_num, runs_to_merge_info, estimated_n);
-
-    // --- Phase 3: Add the new merged run to the target level ---
-    if (!merged_run_info.filename.empty()) {
-        // Check if target level is still valid (should be, but defensive)
-        if (target_level_num > 0 && target_level_num <= MAX_LEVELS && levels_.size() > static_cast<size_t>(target_level_num) && levels_[target_level_num]) {
-            { // Scoped lock for the target level
-                std::lock_guard<std::mutex> target_level_lock(levels_[target_level_num]->level_mutex_);
-                levels_[target_level_num]->add_run(std::move(merged_run_info));
-                // std::cerr << "DEBUG ASYNC MERGE: Added new merged run " << levels_[target_level_num]->sstable_runs_.back().filename << " to L" << target_level_num << "." << std::endl; // Debug
-            } // target_level_lock releases mutex
-
-            // --- Phase 4: Recursively check if the *next* level now needs merging ---
-            if (target_level_num < MAX_LEVELS) { // Can only trigger a merge *from* levels 1 to MAX_LEVELS-1
-                check_and_trigger_merge(target_level_num); // This call will launch another async task if needed
-            } else {
-                // std::cerr << "DEBUG ASYNC MERGE TRIGGER: Target level " << target_level_num << " is MAX_LEVELS. No further merge triggered." << std::endl; // Debug
-            }
-
-        } else {
-            std::cerr << "Critical Error: Target level " << target_level_num << " became invalid in async merge task. Cannot add merged run. File " << merged_run_info.filename << " created but not added to tree." << std::endl;
-            // The merged file exists but isn't tracked. Could attempt to delete it here, but let's just warn.
+        // Check merge condition *while holding the lock*
+        if (current_level->sstable_runs_.size() < SIZE_RATIO) {
+            return;
         }
 
-        // --- Phase 5: Delete old files ---
-        delete_sst_files(files_to_delete); // uses file_delete_mutex_
-        // std::cerr << "DEBUG ASYNC MERGE: Deleted " << files_to_delete.size() << " old files after merge." << std::endl; // Debug
+        // Copy runs to merge info and filenames while holding the lock
+        runs_to_merge_info.reserve(current_level->sstable_runs_.size());
+        files_to_delete.reserve(current_level->sstable_runs_.size());
+        for(const auto& info : current_level->sstable_runs_) {
+            runs_to_merge_info.push_back(info);
+            files_to_delete.push_back(info.filename);
+        }
 
-    } else {
-        // Use the captured level_num here
-        std::cerr << "Error: Merge failed into level " << target_level_num << " in async task. Output file not created. Files from L" << level_num << " were cleared from memory BUT NOT deleted from disk. Manual cleanup of: ";
-        for(const auto& fname : files_to_delete) std::cerr << fname << " ";
-        std::cerr << "may be required." << std::endl;
-        // Note: The source level was already cleared in the synchronous part of check_and_trigger_merge.
-        // The old files were NOT deleted if merge_runs failed.
-    }
-    // std::cerr << "DEBUG ASYNC MERGE: Task for level " << target_level_num << " finished." << std::endl; // Debug
-    }) // <-- Closing parenthesis for std::async
-); // <-- Closing parenthesis and semicolon for push_back
- 
+        // Clear the runs from the current level *now* while the lock is held.
+        current_level->clear_runs();
+    } // current_level_lock releases mutex. Files are still on disk at this point.
+
+    // --- Phase 2: Launch the merge process (File I/O, adding to target, deleting old) asynchronously ---
+    size_t estimated_n = BLOOM_FILTER_ESTIMATED_N_MERGE;
+
+    // Capture necessary variables by value or const reference for the async lambda
+    background_tasks_.push_back(std::async(std::launch::async,
+        [this, level_num, target_level_num, runs_to_merge_info = std::move(runs_to_merge_info), files_to_delete = std::move(files_to_delete), estimated_n]() mutable {
+
+        SSTableInfo merged_run_info = merge_runs(target_level_num, runs_to_merge_info, estimated_n);
+
+        // --- Phase 3: Add the new merged run to the target level ---
+        if (!merged_run_info.filename.empty()) {
+            if (target_level_num > 0 && target_level_num <= MAX_LEVELS && levels_.size() > static_cast<size_t>(target_level_num) && levels_[target_level_num]) {
+                { // Scoped lock for the target level
+                    std::lock_guard<std::mutex> target_level_lock(levels_[target_level_num]->level_mutex_);
+                    levels_[target_level_num]->add_run(std::move(merged_run_info));
+                } // target_level_lock releases mutex
+
+                // --- Phase 4: Recursively check if the *next* level now needs merging ---
+                if (target_level_num < MAX_LEVELS) { 
+                    check_and_trigger_merge(target_level_num); 
+                }
+
+            } else {
+                std::cerr << "Critical Error: Target level " << target_level_num << " became invalid in async merge task. Cannot add merged run. File " << merged_run_info.filename << " created but not added to tree." << std::endl;
+            }
+
+            // --- Phase 5: Delete old files ---
+            delete_sst_files(files_to_delete); // uses file_delete_mutex_
+
+        } else {
+            std::cerr << "Error: Merge failed into level " << target_level_num << " in async task. Output file not created. Files from L" << level_num << " were cleared from memory BUT NOT deleted from disk. Manual cleanup of: ";
+            for(const auto& fname : files_to_delete) std::cerr << fname << " ";
+            std::cerr << "may be required." << std::endl;
+        }
+    }));
 }
+
 // Internal search function used by both public get and range
 std::optional<key_value> lsm_tree::getValueForKey(int key) const {
-int value;
-bool is_tombstone;
-// 1. Check Memtable first (sequentially, fastest path)
-// memtable::find_key handles its own lock.
-if (memtable_ptr_->find_key(key, value, is_tombstone)) {
-    if (is_tombstone) {
-        return std::nullopt; // Found tombstone in memtable - definitive
+    int value;
+    bool is_tombstone;
+    // 1. Check Memtable first (sequentially, fastest path)
+    // memtable::find_key handles its own lock.
+    if (memtable_ptr_->find_key(key, value, is_tombstone)) {
+        if (is_tombstone) {
+            return std::nullopt;
+        }
+        return std::make_optional<key_value>({key, value, false});
     }
-    return std::make_optional<key_value>({key, value, false}); // Found valid entry in memtable - definitive
-}
 
-// 2. If not in memtable, search levels in parallel
-std::vector<std::pair<int, std::future<std::optional<std::tuple<int, int, bool, int>>>>> level_futures;
-level_futures.reserve(MAX_LEVELS); // Reserve space
+    // 2. If not in memtable, search levels in parallel
+    std::vector<std::pair<int, std::future<std::optional<std::tuple<int, int, bool, int>>>>> level_futures;
+    level_futures.reserve(MAX_LEVELS); // Reserve space
 
-for (int i = 1; i <= MAX_LEVELS; ++i) {
-    if (levels_[i]) {
-         // Launch async task for each level's parallel search helper
-         level_futures.push_back({i,
-             std::async(std::launch::async, &level::find_key_parallel, levels_[i], key)
-         });
+    for (int i = 1; i <= MAX_LEVELS; ++i) {
+        if (levels_[i]) {
+            // Launch async task for each level's parallel search helper
+            level_futures.push_back({i,
+                std::async(std::launch::async, &level::find_key_parallel, levels_[i], key)
+            });
+        }
+    }
+
+    // Collect results from levels, prioritizing lower level numbers (newer data)
+    std::optional<key_value> newest_found_kv = std::nullopt;
+    int newest_level_num = MAX_LEVELS + 1;
+
+    for (auto& pair : level_futures) {
+        // .get() waits for the future to complete and retrieves its result
+        std::optional<std::tuple<int, int, bool, int>> result = pair.second.get();
+
+        if (result.has_value()) {
+            auto [res_key, res_value, res_tombstone, res_level_num] = result.value();
+
+            // The lower the level_num, the newer the data.
+            if (res_level_num < newest_level_num) {
+                newest_level_num = res_level_num;
+                newest_found_kv = std::make_optional<key_value>({res_key, res_value, res_tombstone});
+            }
+        }
+    }
+
+    // Determine final result based on the newest entry found in levels
+    if (newest_found_kv.has_value()) {
+        if (newest_found_kv.value().tombstone) {
+            return std::nullopt; 
+        } else {
+            return newest_found_kv; 
+        }
+    } else {
+        return std::nullopt;
     }
 }
 
-// Collect results from levels, prioritizing lower level numbers (newer data)
-std::optional<key_value> newest_found_kv = std::nullopt;
-int newest_level_num = MAX_LEVELS + 1; // Initialize with a value higher than any valid level
-
-for (auto& pair : level_futures) {
-    // int level_num = pair.first; // ********** UNUSED VARIABLE REMOVED **********
-    // .get() waits for the future to complete and retrieves its result
-    std::optional<std::tuple<int, int, bool, int>> result = pair.second.get();
-
-    if (result.has_value()) {
-         auto [res_key, res_value, res_tombstone, res_level_num] = result.value();
-
-         // Since level::find_key_parallel returns the *newest* entry within *that* level,
-         // we just need the newest among the results returned by the parallel tasks.
-         // The lower the level_num, the newer the data.
-         if (res_level_num < newest_level_num) {
-              newest_level_num = res_level_num;
-              newest_found_kv = std::make_optional<key_value>({res_key, res_value, res_tombstone});
-              // We found the newest version across all levels.
-              // If it's not a tombstone, we can stop processing other results,
-              // but waiting for all futures is often simpler cleanup.
-              // The logic below the loop handles which result to return.
-         }
-    }
-}
-
-// Determine final result based on the newest entry found in levels
-if (newest_found_kv.has_value()) {
-     if (newest_found_kv.value().tombstone) {
-          return std::nullopt; // Found a tombstone at the newest level
-     } else {
-          return newest_found_kv; // Found a valid non-tombstone entry at the newest level
-     }
-} else {
-     // Key not found in memtable or any level
-     return std::nullopt;
-}
- 
-}
 // --- Public Interface Implementation ---
-// lsm_tree.cpp
 bool lsm_tree::insert(key_value kv_pair) {
     // Check if shutdown is requested before attempting insert
     if (shutdown_requested_.load()) {
-        // std::cerr << "Warning: Insert attempted during shutdown." << std::endl; // Optional warning
-        return false; // Cannot insert during shutdown
+        return false;
     }
 
     // Try inserting into memtable
@@ -971,106 +941,72 @@ bool lsm_tree::insert(key_value kv_pair) {
 
     // Check if the insertion triggered the need for a flush
     if (trigger_flush) {
-        // std::cout << "Memtable full (size=" << memtable_ptr_->cur_size_ << "). Signaling flusher thread..." << std::endl; // Debug output
-
         // Signal the background flusher thread
         { // Scoped lock for the flush signal flag
             std::lock_guard<std::mutex> lock(flush_mutex_);
             flush_needed_ = true;
-        } // lock releases mutex
+        }
 
         // Notify the flusher thread's condition variable
         flush_request_cv_.notify_one();
     }
-
-    // The insert is considered successful as the data is now in the memtable
-    // (or scheduled for flush if it triggered one).
     return true;
 }
 
-// Public get function using the internal parallel search helper
 int lsm_tree::get(int key, std::ostream& os) {
-    // Use the internal helper to get the key's value
-    std::optional<key_value> result = getValueForKey(key); // Performs parallel search
-    // Lock the output stream to print the result
+    std::optional<key_value> result = getValueForKey(key);
     std::lock_guard<std::mutex> cout_lock(cout_mutex_);
 
     if (result.has_value()) {
         const auto& kv = result.value();
-        // getValueForKey only returns non-tombstone entries if found
         os << kv.value << std::endl;
         return kv.value;
     } else {
-        // Key not found or found as a tombstone
         os << std::endl;
         return -1;
     }
  
 }
 
-// Range function using parallel get calls (via getValueForKey)
-// Replace the existing lsm_tree::range function
 void lsm_tree::range(int start, int end, std::ostream& os) {
     // Use a map to collect the most recent values for each key within the range.
-    // std::map keeps keys sorted automatically.
     std::map<int, key_value> results_map;
 
     // 1. Scan the in-memory memtable (newest data source)
     {
-        // memtable_mutex_ is std::mutex in your code, so use lock_guard.
-        // std::shared_lock would be better if it was std::shared_mutex.
         std::lock_guard<std::mutex> memtable_lock(memtable_ptr_->memtable_mutex_);
 
-        // memtable_ptr_->memtable_ is a std::map<int, key_value>. It's already sorted.
-        // Find the first element whose key is not less than 'start'.
         auto it_low = memtable_ptr_->memtable_.lower_bound(start);
 
-        // Iterate from there up to and including 'end'.
-        // std::map iterators yield std::pair<const int, key_value>.
         for (auto it = it_low; it != memtable_ptr_->memtable_.end() && it->first <= end; ++it) {
-            // Emplace inserts the pair (it->first, it->second) if the key (it->first)
-            // is not already present in results_map. Since memtable is processed first,
-            // any key found here is the most recent version and will be inserted.
             results_map.emplace(it->first, it->second);
         }
-    } // memtable_lock releases mutex
+    }
 
     // 2. Scan levels (from L1 upwards, newest levels first)
     for (int level_num = 1; level_num <= MAX_LEVELS; ++level_num) {
         level* current_level = levels_[level_num];
-        if (!current_level) continue; // Skip if level doesn't exist
+        if (!current_level) continue;
 
         std::vector<SSTableInfo> sstables_to_scan_info;
         {
-            // level_mutex_ is std::mutex in your code, use lock_guard.
-            // std::shared_lock would be better if it was std::shared_mutex.
             std::lock_guard<std::mutex> level_lock(current_level->level_mutex_);
-
-            // Get a copy of the SSTable metadata. The vector itself is copied,
-            // but SSTableInfo contains filename, not large data vectors.
             sstables_to_scan_info = current_level->sstable_runs_;
-        } // level_lock releases mutex
+        }
 
         // Within a level, process newer SSTables first.
-        // Your level::add_run adds runs oldest-first.
-        // The original version 2 example reversed the list *here*.
-        // Let's reverse the *copied* list to process newest runs within the level first.
         std::reverse(sstables_to_scan_info.begin(), sstables_to_scan_info.end());
 
         for (const auto& run_info : sstables_to_scan_info) {
-            // Optimization: Skip this file if its key range does not overlap with the query range [start, end]
-            // This check uses the min/max_key added to SSTableInfo.
+            // Skip this file if its key range does not overlap with the query range [start, end]
             if (run_info.max_key < start || run_info.min_key > end) {
-                // std::cerr << "DEBUG RANGE: Skipping SSTable " << run_info.filename << " (Range [" << run_info.min_key << ", " << run_info.max_key << "] vs [" << start << ", " << end << "])" << std::endl;
                 continue;
             }
-             // std::cerr << "DEBUG RANGE: Scanning SSTable " << run_info.filename << " (Range [" << run_info.min_key << ", " << run_info.max_key << "] vs [" << start << ", " << end << "])" << std::endl;
-
 
             std::ifstream infile(run_info.filename);
             if (!infile) {
                 std::cerr << "Warning: Could not open SSTable TXT file for range query: " << run_info.filename << std::endl;
-                continue; // Skip this file on error
+                continue;
             }
 
             // Use Fence Pointers to find the approximate start offset
@@ -1083,26 +1019,23 @@ void lsm_tree::range(int start, int end, std::ostream& os) {
                                              });
 
                 // If lower_bound is not the first element, go back one to get the fence pointer *before* the block start.
-                // The actual starting key might be in this previous block.
                 if (fp_it != run_info.fence_pointers.begin()) {
-                    --fp_it; // Go back to the FP of the block that *might* contain 'start'
+                    --fp_it; 
                     search_offset = fp_it->second;
                 } else {
                     // If start key is less than or equal to the first FP key, start from the beginning of the file.
-                    search_offset = 0; // The first FP's offset should ideally be 0 anyway.
+                    search_offset = 0;
                 }
-                 // std::cerr << "DEBUG RANGE: Seeking to offset " << search_offset << " for key " << start << " in " << run_info.filename << std::endl;
             } else {
-                 search_offset = 0; // No fence pointers, must scan from the start
-                 // std::cerr << "DEBUG RANGE: No fence pointers in " << run_info.filename << ", starting scan from offset 0." << std::endl;
+                 search_offset = 0;
             }
 
             // Seek the file stream to the calculated offset
             infile.seekg(search_offset);
              if (infile.fail()) {
                  std::cerr << "Warning: Failed to seek to offset " << search_offset << " in file " << run_info.filename << " during range query. Scanning from start." << std::endl;
-                 infile.clear(); // Clear fail bit
-                 infile.seekg(0); // Attempt to seek to start instead
+                 infile.clear();
+                 infile.seekg(0);
                  if (infile.fail()) {
                      std::cerr << "Error: Could not seek to start in file " << run_info.filename << ". Skipping file." << std::endl;
                      infile.close();
@@ -1118,58 +1051,39 @@ void lsm_tree::range(int start, int end, std::ostream& os) {
 
             // Read line by line from the seeked position
             while (std::getline(infile, line)) {
-                if (line.empty()) continue; // Skip empty lines
+                if (line.empty()) continue;
 
                 std::stringstream ss(line);
 
                 if (ss >> current_key >> current_value >> tombstone_flag) {
-                    // Optimization: If we've read past the end of the desired range, stop scanning this file.
+                    // If we've read past the end of the desired range, stop scanning this file.
                     if (current_key > end) {
-                        // std::cerr << "DEBUG RANGE: Reached key " << current_key << " > end key " << end << " in " << run_info.filename << ". Stopping scan for this file." << std::endl;
-                        break; // File is sorted, no more keys in range
+                        break;
                     }
 
                     // If the key is within the desired range [start, end]
-                    if (current_key >= start) { // Already filtered current_key > end above
-                        // Try to add to results_map. emplace returns {iterator, bool}.
-                        // The bool is true if insertion happened (key was new to the map).
-                        // Since we process newest sources first (Memtable -> L1 -> ... -> L_MAX,
-                        // and newest runs within a level), if a key is already in the map,
-                        // it means we've already found a newer version.
+                    if (current_key >= start) { 
                         results_map.emplace(current_key, key_value{current_key, current_value, (tombstone_flag == 1)});
-
-                         // Alternative explicit check:
-                         // if (results_map.find(current_key) == results_map.end()) {
-                         //     results_map.emplace(current_key, key_value{current_key, current_value, (tombstone_flag == 1)});
-                         // }
                     }
                 } else {
                      std::cerr << "Warning: Parsing error during range scan in file: " << run_info.filename << ", line: '" << line << "'" << std::endl;
                 }
             }
              if (!infile.eof() && infile.fail()) {
-                  // Check if the failure was just EOF after successful reads
-                  if (!infile.bad()) { // Check if the stream is just in a fail state, not bad
-                       // This might be expected if the last read attempt failed because there was no more data
-                       // std::cerr << "Warning: Read error or parsing issue near EOF in SSTable TXT file: " << run_info.filename << " during range scan, flags: " << infile.rdstate() << std::endl;
-                  } else {
-                      // A truly bad state
+                  if (infile.bad()) {
                       std::cerr << "Error: Serious read error in SSTable TXT file: " << run_info.filename << " during range scan, flags: " << infile.rdstate() << std::endl;
                   }
              }
-
-            infile.close(); // Close the file stream
-        } // End loop through sstables_to_scan_info
-    } // End loop through levels
+            infile.close();
+        }
+    }
 
     // 3. Collect final results into a vector and filter out tombstones
-    // results_map is already sorted by key.
     std::vector<key_value> final_sorted_results;
     // Estimate size to avoid reallocations
     final_sorted_results.reserve(results_map.size());
 
     for (const auto& pair_entry : results_map) {
-        // pair_entry is std::pair<const int, key_value>
         const key_value& kv = pair_entry.second;
         if (!kv.tombstone) {
             final_sorted_results.push_back(kv);
@@ -1190,45 +1104,42 @@ void lsm_tree::range(int start, int end, std::ostream& os) {
 
 void lsm_tree::delete_key(int key) {
     // Insert a tombstone entry for the key.
-    // This relies on the insert function's locking and flushing/merging logic.
     insert({key, 0, true});
 }
 
-// printStats remains largely the same, using sequential locking for consistency snapshot (of the metadata lists)
 void lsm_tree::printStats(std::ostream& os) const {
     std::lock_guard<std::mutex> cout_lock(cout_mutex_); // Lock for the entire stats output
     os << "--- LSM Tree Stats ---" << std::endl;
     // Data structures to hold intermediate results
-    std::map<int, std::pair<int, std::string>> logical_data; // Map<key, Pair<value, location>>
-    std::set<int> deleted_keys;                             // Keep track of keys confirmed deleted
-    std::vector<long long> physical_key_counts(MAX_LEVELS + 1, 0); // Count all keys per level file
+    std::map<int, std::pair<int, std::string>> logical_data;
+    std::set<int> deleted_keys;                             
+    std::vector<long long> physical_key_counts(MAX_LEVELS + 1, 0);
 
     // --- Stage 1: Process data from newest to oldest to find logical state ---
 
     // 1.a Process Memtable
     {
         std::lock_guard<std::mutex> memtable_lock(memtable_ptr_->memtable_mutex_);
-        for (const auto& pair : memtable_ptr_->memtable_) { // Iterate through map pairs (key, key_value)
-            const auto& kv = pair.second; // Get the key_value struct
+        for (const auto& pair : memtable_ptr_->memtable_) {
+            const auto& kv = pair.second;
 
             // If key already processed (found newer version in map itself or already marked deleted in map processing), skip
-            // This check is slightly redundant with map logic but harmless.
             if (logical_data.count(kv.key) || deleted_keys.count(kv.key)) {
                 continue;
             }
 
             if (kv.tombstone) {
-                deleted_keys.insert(kv.key); // Mark as deleted, don't add to logical_data
+                deleted_keys.insert(kv.key);
             } else {
-                logical_data[kv.key] = {kv.value, "M"}; // Found latest version in Memtable
+                logical_data[kv.key] = {kv.value, "M"}; 
             }
         }
-    } // memtable_lock goes out of scope
+    } 
 
     // 1.b Process Levels (from L1 down to MAX_LEVELS)
     for (int level_num = 1; level_num <= MAX_LEVELS; ++level_num) {
         level* current_level = levels_[level_num];
-        if (!current_level) continue; // Skip if level doesn't exist
+        if (!current_level) continue;
 
         // Lock the level while iterating its run list (sstable_runs_)
         std::lock_guard<std::mutex> level_lock(current_level->level_mutex_);
@@ -1247,9 +1158,8 @@ void lsm_tree::printStats(std::ostream& os) const {
             long long current_file_key_count = 0;
             std::string line;
 
-            // Read line by line
             while (std::getline(infile, line)) {
-                if (line.empty()) continue; // Skip empty lines
+                if (line.empty()) continue;
 
                 std::stringstream ss(line);
                 int current_key, current_value, tombstone_flag;
@@ -1260,14 +1170,14 @@ void lsm_tree::printStats(std::ostream& os) const {
 
                     // Check if key already has a newer version or is known to be deleted
                     if (logical_data.count(current_key) || deleted_keys.count(current_key)) {
-                        continue; // Skip older/deleted versions
+                        continue;
                     }
 
                     // This is the newest version encountered so far for this key
                     if (current_tombstone) {
-                        deleted_keys.insert(current_key); // Mark as deleted
+                        deleted_keys.insert(current_key);
                     } else {
-                        logical_data[current_key] = {current_value, "L" + std::to_string(level_num)}; // Store value and location
+                        logical_data[current_key] = {current_value, "L" + std::to_string(level_num)}; 
                     }
                 } else {
                     std::cerr << "Warning: Parsing error during stats in file: " << filename << ", line: " << line << std::endl;
@@ -1280,7 +1190,7 @@ void lsm_tree::printStats(std::ostream& os) const {
             physical_key_counts[level_num] += current_file_key_count;
             infile.close();
         }
-    } // level_lock goes out of scope
+    }
 
     // --- Stage 2: Print the statistics based on collected data ---
 
@@ -1295,7 +1205,7 @@ void lsm_tree::printStats(std::ostream& os) const {
     os << std::endl;
 
     // (3) Dump Tree (Logical view: Key:Value:Level)
-    std::map<std::string, std::vector<std::pair<int, int>>> entries_by_location; // Group by M or L<num>
+    std::map<std::string, std::vector<std::pair<int, int>>> entries_by_location;
 
     // Group by location first
     for(const auto& pair : logical_data) {
@@ -1320,7 +1230,7 @@ void lsm_tree::printStats(std::ostream& os) const {
             for (const auto& kv_pair : entries_by_location[location_str]) {
                 os << kv_pair.first << ":" << kv_pair.second << ":" << location_str << " ";
             }
-            os << std::endl; // Newline after each level's entries
+            os << std::endl;
         }
     }
 
@@ -1338,42 +1248,31 @@ void lsm_tree::cleanup_files() {
     std::vector<std::string> files_to_delete;
     { // Scoped lock for this level
     std::lock_guard<std::mutex> level_lock(levels_[i]->level_mutex_);
-    files_to_delete = levels_[i]->get_run_filenames(); // Now calls the added definition
-    levels_[i]->clear_runs(); // Now calls the added definition
-    } // level_lock releases mutex
+    files_to_delete = levels_[i]->get_run_filenames(); 
+    levels_[i]->clear_runs(); 
+    } 
     // Delete the physical files after releasing the level lock
-            delete_sst_files(files_to_delete); // delete_sst_files uses file_delete_mutex_ internally
-
+            delete_sst_files(files_to_delete);
             // Remove the level directory
             std::string level_dir = DATA_DIR + "/L" + std::to_string(i);
             if (rmdir(level_dir.c_str()) != 0) {
                 if (errno != ENOTEMPTY && errno != ENOENT) { // ENOENT means it was already gone
                     std::cerr << "Warning: Could not remove directory " << level_dir << ": " << strerror(errno) << std::endl;
-                } else if (errno == ENOTEMPTY) {
-                    // std::cerr << "Info: Directory not empty, not removed: " << level_dir << std::endl;
                 }
-            } else {
-                // std::cout << "Removed directory: " << level_dir << std::endl;
             }
         }
     }
     // Remove the root data directory
     if (rmdir(DATA_DIR.c_str()) != 0) {
-        if (errno != ENOTEMPTY && errno != ENOENT) { // ENOENT means it was already gone
+        if (errno != ENOTEMPTY && errno != ENOENT) { 
             std::cerr << "Warning: Could not remove root data directory " << DATA_DIR << ": " << strerror(errno) << std::endl;
-        } else if (errno == ENOTEMPTY) {
-            // std::cerr << "Info: Root data directory not empty, not removed: " << DATA_DIR << std::endl;
         }
-    } else {
-        // std::cout << "Removed directory: " << DATA_DIR << std::endl;
     }
-
     // Reset run ID generator
     std::lock_guard<std::mutex> id_lock(id_mutex_);
     next_run_id_ = 0;
-    // std::cout << "DEBUG: Reset next_run_id_ to 0." << std::endl; // Debug
- 
 }
+
 // Public wrapper for load_file (loads a list of commands)
 void lsm_tree::load(const std::string& fileName) {
     std::ifstream infile(fileName);
@@ -1398,7 +1297,7 @@ void lsm_tree::load(const std::string& fileName) {
             } else if (command == "GET") {
                 int key;
                 ss >> key;
-                get(key, std::cout); // Use the parallel get
+                get(key, std::cout);
             } else if (command == "DELETE") {
                 int key;
                 ss >> key;
@@ -1406,7 +1305,7 @@ void lsm_tree::load(const std::string& fileName) {
             } else if (command == "RANGE") {
                 int start, end;
                 ss >> start >> end;
-                range(start, end, std::cout); // Use the parallel range
+                range(start, end, std::cout);
             } else if (command.empty() || command[0] == '#') {
                 // Ignore empty lines or comments
             }
@@ -1422,8 +1321,6 @@ void lsm_tree::load(const std::string& fileName) {
 }
 
 void lsm_tree::flushThreadLoop() {
-    // std::cout << "Flusher thread started." << std::endl; // Debug
-
     while (true) {
         // Wait for a flush request or shutdown signal
         std::unique_lock<std::mutex> lock(flush_mutex_);
@@ -1433,23 +1330,18 @@ void lsm_tree::flushThreadLoop() {
         });
 
         // Check for shutdown request AFTER waking up
-        // If shutdown is requested AND there's no pending flush (flush_needed_ is false), exit the loop.
-        // If shutdown is requested *but* flush_needed_ is true, process the pending flush first.
         if (shutdown_requested_.load() && !flush_needed_) {
-            // std::cout << "Flusher thread received shutdown signal and no pending flush. Exiting." << std::endl; // Debug
-            break; // Exit the thread loop
+            break;
         }
 
         // If we woke up because flush_needed_ is true (or shutdown was requested and flush_needed_ was true)
         if (flush_needed_) {
-             flush_needed_ = false; // Reset the flag *while holding the lock*
+             flush_needed_ = false;
 
             // Unlock the mutex while performing the potentially blocking I/O and other work
             lock.unlock();
-            // std::cout << "Flusher thread woke up, performing flush..." << std::endl; // Debug
 
             // --- Flush the memtable (Logic copied from original async lambda in insert) ---
-            // flush() acquires memtable_mutex_ internally
             std::vector<key_value> data_to_flush = memtable_ptr_->flush();
 
             if (!data_to_flush.empty()) {
@@ -1459,34 +1351,23 @@ void lsm_tree::flushThreadLoop() {
                 // Write the flushed data to the new SSTable file and get its info (including filter)
                 SSTableInfo new_run_info = write_sstable(data_to_flush, new_sstable_file, data_to_flush.size());
 
-                if (!new_run_info.filename.empty()) { // Check if write was successful
+                if (!new_run_info.filename.empty()) {
                     // Add the new run (info) to Level 1
                     if (levels_.size() > 1 && levels_[1]) {
                         // Need to lock Level 1 to add the run
                         std::lock_guard<std::mutex> l1_lock(levels_[1]->level_mutex_);
                         levels_[1]->add_run(std::move(new_run_info)); // add_run assumes lock held
-                        // std::cerr << "DEBUG FLUSHER: Added new run " << levels_[1]->sstable_runs_.back().filename << " to L1." << std::endl; // Debug
                     } else {
                          std::cerr << "Critical Error: Level 1 is null or levels_ vector too small in flusher task. Cannot add flushed run." << std::endl;
-                         // Data loss: file exists but isn't tracked.
                     }
 
-                    // Check if Level 1 needs merging now. This recursive call will handle subsequent merges
-                    // and also launch them asynchronously using background_tasks_.
-                    check_and_trigger_merge(1); // This function already handles launching async merge tasks
+                    // Check if Level 1 needs merging now
+                    check_and_trigger_merge(1);
 
                 } else {
                     std::cerr << "Error: Failed to write flushed memtable to disk in flusher task. Data potentially lost." << std::endl;
-                    // File might exist but is incomplete, or might have been deleted by write_sstable on error.
-                    // No automatic cleanup of partially written file if write_sstable failed badly without deleting.
                 }
-             } else {
-                 // Memtable was full, but flush returned empty data. This is unexpected, but handled.
-                 // std::cerr << "Warning: Memtable was full, but flush returned empty data in flusher thread." << std::endl;
              }
-             // --- End Flush Logic ---
-
-             // Reacquire the lock before going back to wait (unique_lock handles this if not explicitly unlocked)
         }
     }
 }
