@@ -7,17 +7,15 @@
 #include <thread>
 #include <mutex>
 #include <memory>
-#include <cstdio> // For perror, remove
-#include <atomic> // For command index
-
+#include <cstdio> 
+#include <atomic> 
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <unistd.h> // For close
-
+#include <unistd.h> 
 #include <cerrno>
-#include <cstring> // For strerror
-#include <chrono> // For timing
+#include <cstring> 
+#include <chrono> 
 
 // --- Server Configuration ---
 const int SERVER_PORT = 8080;

@@ -1,18 +1,14 @@
 #include <iostream>
 #include <string>
 #include <vector>
-#include <cstdio>   // For perror, close
+#include <cstdio>
 #include <sstream>
 #include <fstream>
-
-// POSIX socket headers
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <netdb.h>
-
-// Headers for error handling and types
 #include <cerrno>
 #include <cstring>
 

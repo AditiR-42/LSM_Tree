@@ -210,6 +210,7 @@ bool operator>(const merge_entry& other) const {
 // --- Level Class Implementation ---
 level::level(int capacity, int curr_level) : capacity_(capacity), curr_level_(curr_level) {
 }
+
 level::~level() {
 }
 
