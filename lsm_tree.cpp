@@ -1063,8 +1063,6 @@ void lsm_tree::range(int start, int end, std::ostream& os) {
     // This map will correctly handle overwrites and tombstones because we process sources newest-to-oldest.
     std::map<int, key_value> results_map;
 
-    auto start_time = std::chrono::high_resolution_clock::now();
-
     // 1. Scan the in-memory memtable (newest data source)
     {
         std::lock_guard<std::mutex> memtable_lock(memtable_ptr_->memtable_mutex_);
@@ -1164,24 +1162,17 @@ void lsm_tree::range(int start, int end, std::ostream& os) {
         }
     }
 
-    auto end_time = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> elapsed = end_time - start_time;
-
     // 7. Lock the output stream for printing the entire range result
     std::lock_guard<std::mutex> cout_lock(cout_mutex_);
 
-    // os << "Range (" << start << " to " << end << "): ";
+    os << "Range (" << start << " to " << end << "): ";
     // // Iterate through the sorted vector and print the found key-value pairs
     // // The map iterates in key order, so final_sorted_results is already sorted by key.
     // for (const auto& kv : final_sorted_results) {
     //     os << kv.key << ":" << kv.value << " ";
     // }
 
-    os << "SIZE: " << final_sorted_results.size() << std::endl;;
-
-    os << "Range query [" << start << ", " << end << "] processing time: "
-            << elapsed.count() << " seconds";
-    os << std::endl;
+    os << " SIZE: " << final_sorted_results.size() << std::endl;;
 }
 
 
