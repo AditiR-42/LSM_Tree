@@ -23,6 +23,7 @@
 #include <future>
 #include <tuple>
 #include <optional>
+#include <chrono>
 
 using namespace std;
 
@@ -969,119 +970,191 @@ int lsm_tree::get(int key, std::ostream& os) {
  
 }
 
+std::vector<key_value> lsm_tree::read_range_from_file(const SSTableInfo& run_info, int start_key, int end_key) const {
+    std::vector<key_value> found_pairs;
+
+    // Skip this file if its key range does not overlap with the query range [start_key, end_key]
+    if (run_info.max_key < start_key || run_info.min_key > end_key) {
+        return found_pairs; // Return empty vector
+    }
+
+    std::ifstream infile(run_info.filename);
+    if (!infile) {
+        std::cerr << "Warning: Could not open SSTable TXT file for range query in helper: " << run_info.filename << std::endl;
+        return found_pairs; // Return empty vector
+    }
+
+    // Buffering might help sequential reads
+    std::vector<char> buffer(4096); // Example buffer size (e.g., 4KB or larger)
+    infile.rdbuf()->pubsetbuf(buffer.data(), buffer.size());
+
+    // Use Fence Pointers to find the approximate start offset
+    long long search_offset = 0;
+    if (!run_info.fence_pointers.empty()) {
+        // Find the first fence pointer whose key is >= start_key
+        auto fp_it = std::lower_bound(run_info.fence_pointers.begin(), run_info.fence_pointers.end(), start_key,
+                                     [](const std::pair<int, long long>& fp, int target_key){
+                                         return fp.first < target_key;
+                                     });
+
+        // If lower_bound is not the first element, go back one to get the fence pointer *before* the block start.
+        if (fp_it != run_info.fence_pointers.begin()) {
+            --fp_it;
+            search_offset = fp_it->second;
+        } else {
+            // If start_key is less than or equal to the first FP key, start from the beginning of the file.
+            search_offset = 0;
+        }
+    } else {
+         search_offset = 0;
+    }
+
+    // Seek the file stream to the calculated offset
+    infile.seekg(search_offset);
+     if (infile.fail()) {
+         std::cerr << "Warning: Failed to seek to offset " << search_offset << " in file " << run_info.filename << " during range query helper. Scanning from start." << std::endl;
+         infile.clear();
+         infile.seekg(0);
+         if (infile.fail()) {
+             std::cerr << "Error: Could not seek to start in file " << run_info.filename << ". Skipping file read." << std::endl;
+             infile.close();
+             return found_pairs; // Return empty vector
+         }
+     }
+
+    std::string line;
+    int current_key;
+    int current_value;
+    int tombstone_flag;
+
+    // Read line by line from the seeked position
+    while (std::getline(infile, line)) {
+        if (line.empty()) continue;
+
+        std::stringstream ss(line);
+
+        if (ss >> current_key >> current_value >> tombstone_flag) {
+            // If we've read past the end of the desired range, stop scanning this file.
+            if (current_key > end_key) {
+                break;
+            }
+
+            // If the key is within the desired range [start_key, end_key]
+            if (current_key >= start_key) {
+                 found_pairs.push_back({current_key, current_value, (tombstone_flag == 1)});
+            }
+        } else {
+             std::cerr << "Warning: Parsing error during range scan in helper file: " << run_info.filename << ", line: '" << line << "'" << std::endl;
+        }
+    }
+     if (!infile.eof() && infile.fail()) {
+          if (infile.bad()) {
+              std::cerr << "Error: Serious read error in SSTable TXT file: " << run_info.filename << " during range scan helper, flags: " << infile.rdstate() << std::endl;
+          }
+     }
+    infile.close();
+
+    // The pairs found in a single file within a range are already sorted by key
+    return found_pairs;
+}
+
 void lsm_tree::range(int start, int end, std::ostream& os) {
     // Use a map to collect the most recent values for each key within the range.
+    // This map will correctly handle overwrites and tombstones because we process sources newest-to-oldest.
     std::map<int, key_value> results_map;
+
+    auto start_time = std::chrono::high_resolution_clock::now();
 
     // 1. Scan the in-memory memtable (newest data source)
     {
         std::lock_guard<std::mutex> memtable_lock(memtable_ptr_->memtable_mutex_);
-
         auto it_low = memtable_ptr_->memtable_.lower_bound(start);
-
         for (auto it = it_low; it != memtable_ptr_->memtable_.end() && it->first <= end; ++it) {
-            results_map.emplace(it->first, it->second);
+            results_map.emplace(it->first, it->second); // Emplace keeps the first (newest) version
         }
     }
 
-    // 2. Scan levels (from L1 upwards, newest levels first)
+    // 2. Collect ALL relevant SSTable runs from ALL levels
+    // We need to store them along with their level number to maintain processing order
+    std::vector<std::pair<int, SSTableInfo>> all_relevant_runs;
+
     for (int level_num = 1; level_num <= MAX_LEVELS; ++level_num) {
         level* current_level = levels_[level_num];
         if (!current_level) continue;
 
-        std::vector<SSTableInfo> sstables_to_scan_info;
+        std::vector<SSTableInfo> sstables_in_level;
         {
             std::lock_guard<std::mutex> level_lock(current_level->level_mutex_);
-            sstables_to_scan_info = current_level->sstable_runs_;
-        }
+            sstables_in_level = current_level->sstable_runs_;
+        } // Lock released
 
-        // Within a level, process newer SSTables first.
-        std::reverse(sstables_to_scan_info.begin(), sstables_to_scan_info.end());
-
-        for (const auto& run_info : sstables_to_scan_info) {
-            // Skip this file if its key range does not overlap with the query range [start, end]
-            if (run_info.max_key < start || run_info.min_key > end) {
-                continue;
-            }
-
-            std::ifstream infile(run_info.filename);
-            if (!infile) {
-                std::cerr << "Warning: Could not open SSTable TXT file for range query: " << run_info.filename << std::endl;
-                continue;
-            }
-
-            // Use Fence Pointers to find the approximate start offset
-            long long search_offset = 0;
-            if (!run_info.fence_pointers.empty()) {
-                // Find the first fence pointer whose key is >= start
-                auto fp_it = std::lower_bound(run_info.fence_pointers.begin(), run_info.fence_pointers.end(), start,
-                                             [](const std::pair<int, long long>& fp, int target_key){
-                                                 return fp.first < target_key;
-                                             });
-
-                // If lower_bound is not the first element, go back one to get the fence pointer *before* the block start.
-                if (fp_it != run_info.fence_pointers.begin()) {
-                    --fp_it; 
-                    search_offset = fp_it->second;
-                } else {
-                    // If start key is less than or equal to the first FP key, start from the beginning of the file.
-                    search_offset = 0;
-                }
-            } else {
-                 search_offset = 0;
-            }
-
-            // Seek the file stream to the calculated offset
-            infile.seekg(search_offset);
-             if (infile.fail()) {
-                 std::cerr << "Warning: Failed to seek to offset " << search_offset << " in file " << run_info.filename << " during range query. Scanning from start." << std::endl;
-                 infile.clear();
-                 infile.seekg(0);
-                 if (infile.fail()) {
-                     std::cerr << "Error: Could not seek to start in file " << run_info.filename << ". Skipping file." << std::endl;
-                     infile.close();
-                     continue; // Skip this file
-                 }
+        // Filter runs by key range overlap and add to the collection
+        for (const auto& run_info : sstables_in_level) {
+             if (!(run_info.max_key < start || run_info.min_key > end)) { // Check for overlap
+                all_relevant_runs.push_back({level_num, run_info});
              }
-
-
-            std::string line;
-            int current_key;
-            int current_value;
-            int tombstone_flag;
-
-            // Read line by line from the seeked position
-            while (std::getline(infile, line)) {
-                if (line.empty()) continue;
-
-                std::stringstream ss(line);
-
-                if (ss >> current_key >> current_value >> tombstone_flag) {
-                    // If we've read past the end of the desired range, stop scanning this file.
-                    if (current_key > end) {
-                        break;
-                    }
-
-                    // If the key is within the desired range [start, end]
-                    if (current_key >= start) { 
-                        results_map.emplace(current_key, key_value{current_key, current_value, (tombstone_flag == 1)});
-                    }
-                } else {
-                     std::cerr << "Warning: Parsing error during range scan in file: " << run_info.filename << ", line: '" << line << "'" << std::endl;
-                }
-            }
-             if (!infile.eof() && infile.fail()) {
-                  if (infile.bad()) {
-                      std::cerr << "Error: Serious read error in SSTable TXT file: " << run_info.filename << " during range scan, flags: " << infile.rdstate() << std::endl;
-                  }
-             }
-            infile.close();
         }
     }
 
-    // 3. Collect final results into a vector and filter out tombstones
+    // 3. Sort the collected runs by level (ascending, L1 first) and then by run within level (descending, newest run first)
+    // This determines the order in which we will *process* the results to ensure correctness.
+    std::sort(all_relevant_runs.begin(), all_relevant_runs.end(),
+              [](const std::pair<int, SSTableInfo>& a, const std::pair<int, SSTableInfo>& b) {
+                  if (a.first != b.first) {
+                      return a.first < b.first; // Sort by level ascending (L1 < L2 < ...)
+                  }
+                  // Within the same level, sort by run filename/ID descending (newest run first)
+                  // Assumes filename format SST-XXXX.txt where XXXX is increasing ID
+                  size_t prefix_len = SST_FILE_PREFIX.length();
+                  size_t suffix_len = SST_FILE_SUFFIX.length();
+                  size_t a_sst_pos = a.second.filename.length() - suffix_len;
+                  size_t b_sst_pos = b.second.filename.length() - suffix_len;
+
+                  if (a_sst_pos > prefix_len && b_sst_pos > prefix_len) {
+                     try {
+                          long long run_id_a = std::stoll(a.second.filename.substr(prefix_len, a_sst_pos - prefix_len));
+                          long long run_id_b = std::stoll(b.second.filename.substr(prefix_len, b_sst_pos - prefix_len));
+                          return run_id_a > run_id_b; // Sort by run ID descending (newest first)
+                     } catch (...) {
+                         // Fallback to string comparison if parsing fails
+                         std::cerr << "Warning: Exception parsing run ID for sort during range. Falling back to string compare." << std::endl;
+                     }
+                  }
+                  return a.second.filename > b.second.filename; // Fallback string compare descending
+              });
+
+
+    // 4. Launch parallel tasks to read from each relevant SSTable file
+    std::vector<std::future<std::vector<key_value>>> file_read_futures;
+    file_read_futures.reserve(all_relevant_runs.size());
+
+    for (const auto& level_run_pair : all_relevant_runs) {
+        const SSTableInfo& run_info = level_run_pair.second;
+        // Launch async task to read this file's range
+        file_read_futures.push_back(std::async(std::launch::async,
+                                              &lsm_tree::read_range_from_file,
+                                              this, // Pass the lsm_tree instance pointer
+                                              run_info, start, end));
+    }
+
+    // 5. Collect results from futures IN THE SAME SORTED ORDER and merge into results_map
+    // The futures vector is already ordered according to `all_relevant_runs` due to the loop.
+    // So we can just iterate through the futures vector.
+    for (auto& future : file_read_futures) {
+        std::vector<key_value> file_results = future.get(); // Wait for task to complete and get results
+
+        // Merge results from this file into the main map.
+        // Since we iterate through futures in sorted order (newest sources first),
+        // emplace will correctly keep the newest version of any key.
+        for (const auto& kv : file_results) {
+            results_map.emplace(kv.key, kv);
+        }
+    }
+
+
+    // 6. Collect final results into a vector and filter out tombstones
     std::vector<key_value> final_sorted_results;
-    // Estimate size to avoid reallocations
+    // Estimate size to avoid reallocations, potentially smaller due to tombstones
     final_sorted_results.reserve(results_map.size());
 
     for (const auto& pair_entry : results_map) {
@@ -1091,17 +1164,26 @@ void lsm_tree::range(int start, int end, std::ostream& os) {
         }
     }
 
-    // 4. Lock the output stream for printing the entire range result
+    auto end_time = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed = end_time - start_time;
+
+    // 7. Lock the output stream for printing the entire range result
     std::lock_guard<std::mutex> cout_lock(cout_mutex_);
 
-    os << "Range (" << start << " to " << end << "): ";
-    // Iterate through the sorted vector and print the found key-value pairs
-    for (const auto& kv : final_sorted_results) {
-        os << kv.key << ":" << kv.value << " ";
-    }
-    os << std::endl;
+    // os << "Range (" << start << " to " << end << "): ";
+    // // Iterate through the sorted vector and print the found key-value pairs
+    // // The map iterates in key order, so final_sorted_results is already sorted by key.
+    // for (const auto& kv : final_sorted_results) {
+    //     os << kv.key << ":" << kv.value << " ";
+    // }
 
+    os << "SIZE: " << final_sorted_results.size() << std::endl;;
+
+    os << "Range query [" << start << ", " << end << "] processing time: "
+            << elapsed.count() << " seconds";
+    os << std::endl;
 }
+
 
 void lsm_tree::delete_key(int key) {
     // Insert a tombstone entry for the key.

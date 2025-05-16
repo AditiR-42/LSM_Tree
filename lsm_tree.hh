@@ -14,6 +14,9 @@
 #include <optional> 
 #include <map>
 #include <limits>
+#include <atomic>
+#include <thread>
+#include <condition_variable>
 
 #include "bloom_filter.hh"
 
@@ -173,6 +176,8 @@ public:
     void cleanup_files();
 
     void load(const std::string& fileName);
+
+    std::vector<key_value> read_range_from_file(const SSTableInfo& run_info, int start_key, int end_key) const;
 };
 
 #endif // LSM_TREE_HH
