@@ -21,7 +21,7 @@
 #include "bloom_filter.hh"
 
 // --- Constants ---
-const int MEMTABLE_CAPACITY = 100;
+const int MEMTABLE_CAPACITY = 333;
 const int INITIAL_LEVEL_CAPACITY = 10; 
 const int SIZE_RATIO = 5; 
 const int MAX_LEVELS = 10;
